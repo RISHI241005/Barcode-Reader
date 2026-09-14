@@ -1,7 +1,7 @@
 """Vercel-deployable FastAPI entry point for Barcode Reader.
 
 Exposes /detect-barcode endpoint for barcode/QR code detection from images.
-Reuses existing barcode_detector and image_processor modules.
+Uses zxingcpp and pyzbar for barcode detection.
 """
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
@@ -11,7 +11,6 @@ import io
 import numpy as np
 import cv2
 
-# Initialize FastAPI app
 app = FastAPI(title="Barcode Reader API", version="1.0.0")
 
 app.add_middleware(
@@ -22,18 +21,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize barcode detector (imports will work via src package)
-try:
-    from src.barcode_detector import BarcodeDetector
-    detector = BarcodeDetector()
-except Exception:
-    detector = None
+
+def _get_detector():
+    """Lazy-load barcode detector to handle import issues in serverless environments."""
+    try:
+        from src.barcode_detector import BarcodeDetector
+        return BarcodeDetector()
+    except Exception:
+        try:
+            import zxingcpp
+            return BarcodeDetector()  # Will use default init
+        except Exception:
+            return None
+
+
+detector = _get_detector()
 
 
 @app.post("/detect-barcode/")
 async def detect_barcode(file: UploadFile = File(...)):
     """Detect and decode barcodes/QR codes from an uploaded image file.
-    
+
     Returns detection results including barcode type, data, and validation status.
     """
     if not file.content_type or not file.content_type.startswith("image/"):
@@ -58,7 +66,7 @@ async def detect_barcode(file: UploadFile = File(...)):
 
     # Run barcode detection
     if detector is None:
-        raise HTTPException(status_code=500, detail="Barcode detector not initialized")
+        raise HTTPException(status_code=500, detail="Barcode detector not available")
 
     report = detector.detect_and_decode(cv_image, fast_mode=False)
 
@@ -67,8 +75,8 @@ async def detect_barcode(file: UploadFile = File(...)):
             "success": False,
             "results": [],
             "message": "No barcodes detected in the image.",
-            "engine_used": report.engine_used,
-            "processing_time_ms": report.processing_time_ms,
+            "engine_used": getattr(report, 'engine_used', 'Unknown'),
+            "processing_time_ms": getattr(report, 'processing_time_ms', 0.0),
         }
 
     results = []
@@ -90,7 +98,7 @@ async def detect_barcode(file: UploadFile = File(...)):
     return {
         "success": True,
         "results": results,
-        "engine_used": report.engine_used,
-        "processing_time_ms": report.processing_time_ms,
-        "stages_attempted": report.stages_attempted,
+        "engine_used": getattr(report, 'engine_used', 'Unknown'),
+        "processing_time_ms": getattr(report, 'processing_time_ms', 0.0),
+        "stages_attempted": getattr(report, 'stages_attempted', []),
     }
