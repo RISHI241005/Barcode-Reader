@@ -1,17 +1,17 @@
-"""Vercel-deployable FastAPI entry point for Barcode Reader."""
+"""Vercel-deployable FastAPI entry point for Barcode Reader.
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+Exposes /detect-barcode endpoint for barcode/QR code detection from images.
+Reuses existing barcode_detector and image_processor modules.
+"""
+
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import numpy as np
 from PIL import Image
 import io
+import numpy as np
 import cv2
 
-from src.barcode_detector import BarcodeDetector
-from src.image_processor import ImageProcessor
-from src.models import BarcodeResult, DetectionReport
-from src.utils import normalize_barcode_type
-
+# Initialize FastAPI app
 app = FastAPI(title="Barcode Reader API", version="1.0.0")
 
 app.add_middleware(
@@ -22,14 +22,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-detector = BarcodeDetector()
+# Initialize barcode detector (imports will work via src package)
+try:
+    from src.barcode_detector import BarcodeDetector
+    detector = BarcodeDetector()
+except Exception:
+    detector = None
 
 
 @app.post("/detect-barcode/")
 async def detect_barcode(file: UploadFile = File(...)):
     """Detect and decode barcodes/QR codes from an uploaded image file.
-
-    Returns detection results including barcode type, data, and confidence.
+    
+    Returns detection results including barcode type, data, and validation status.
     """
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
@@ -52,6 +57,9 @@ async def detect_barcode(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=f"Invalid image format: {str(e)}")
 
     # Run barcode detection
+    if detector is None:
+        raise HTTPException(status_code=500, detail="Barcode detector not initialized")
+
     report = detector.detect_and_decode(cv_image, fast_mode=False)
 
     if not report.success or not report.results:
@@ -86,7 +94,3 @@ async def detect_barcode(file: UploadFile = File(...)):
         "processing_time_ms": report.processing_time_ms,
         "stages_attempted": report.stages_attempted,
     }
-
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)

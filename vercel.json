@@ -1,13 +1,11 @@
 {
   "framework": "fastapi",
   "region": "auto",
-  "build": "pip install -r requirements.txt && pip install python-multipart",
+  "build": "pip install -r requirements.txt",
   "install": "pip install -r requirements.txt",
   "start": "python -m uvicorn app_vercel:app --host 0.0.0.0 --port $PORT",
   "frameworkToken": "",
-  "functions": {
-    "app_vercel.py": {
-      "runtime": "python3.11"
-    }
+  "python": {
+    "runtime": "3.11"
   }
 }
