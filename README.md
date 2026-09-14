@@ -248,7 +248,7 @@ DB_HOST=localhost
 DB_PORT=3306
 DB_NAME=barcode_reader
 DB_USER=root
-DB_PASSWORD=your_actual_mysql_password
+DB_PASSWORD=Rishi@042405
 
 # Authentication & Session Security
 SESSION_TIMEOUT_MINUTES=30

@@ -33,7 +33,7 @@ class DatabaseManager:
         self.port = int(port or os.getenv("DB_PORT", "3306"))
         self.database = database or os.getenv("DB_NAME", "barcode_reader")
         self.user = user or os.getenv("DB_USER", "root")
-        self.password = password if password is not None else os.getenv("DB_PASSWORD", "")
+        self.password = password if password is not None else os.getenv("DB_PASSWORD", "Rishi@042405")
 
     def reload_config(self):
         """Reload configuration from .env file."""
@@ -43,7 +43,7 @@ class DatabaseManager:
         self.port = int(os.getenv("DB_PORT", "3306"))
         self.database = os.getenv("DB_NAME", "barcode_reader")
         self.user = os.getenv("DB_USER", "root")
-        self.password = os.getenv("DB_PASSWORD", "")
+        self.password = os.getenv("DB_PASSWORD", "Rishi@042405")
 
     def get_connection(self, include_database: bool = True):
         """Obtain a new connection to MySQL server with a strict timeout."""
