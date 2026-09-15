@@ -1,2 +1,15 @@
+[project]
+name = "barcode-reader-api"
+version = "1.0.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "python-multipart>=0.0.9",
+    "pillow>=10.0.0",
+    "numpy>=1.26,<3",
+    "opencv-python-headless>=4.10,<5",
+    "zxing-cpp>=3.0.0",
+]
+
 [tool.vercel]
 entrypoint = "app_vercel:app"
