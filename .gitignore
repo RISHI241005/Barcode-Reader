@@ -1,6 +1,7 @@
 # Environments & Secrets
 .env
 .env.local
+.vercel/
 .venv/
 env/
 venv/

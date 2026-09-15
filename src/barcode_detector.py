@@ -1,6 +1,7 @@
 """Barcode and QR code detection, decoding, rotation handling, and deduplication engine."""
 
 import time
+import numpy as np
 from typing import List, Optional, Set, Tuple
 
 from src.models import BarcodeResult, DetectionReport, ImageMetrics

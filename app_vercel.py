@@ -6,6 +6,7 @@ Uses lazy detector initialization to handle serverless import issues.
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from PIL import Image
 import io
 import logging
@@ -17,7 +18,7 @@ app = FastAPI(title="Barcode Reader API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -49,13 +50,14 @@ def _get_detector():
 
 
 @app.get("/api")
-async def health_check():
+def health_check():
     """Health check endpoint that verifies the API is running.
 
-    Does NOT initialize the barcode detector, allowing Vercel health checks
-    to work independently of native barcode dependencies.
+    Verify native barcode dependencies as well as HTTP availability.
     """
     detector = _get_detector()
+    if detector is None:
+        raise HTTPException(status_code=503, detail="Barcode detector unavailable")
     return {
         "status": "ok",
         "service": "barcode-reader-api",
@@ -64,8 +66,13 @@ async def health_check():
     }
 
 
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse("/docs")
+
+
 @app.post("/api/detect-barcode")
-async def detect_barcode(file: UploadFile = File(...)):
+def detect_barcode(file: UploadFile = File(...)):
     """Detect and decode barcodes/QR codes from an uploaded image file.
 
     Returns detection results including barcode type, data, and validation status.
@@ -74,14 +81,20 @@ async def detect_barcode(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="File must be an image")
 
     # Read the uploaded file into memory
-    image_data = await file.read()
+    image_data = file.file.read(4 * 1024 * 1024 + 1)
+    if len(image_data) > 4 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Image must be 4 MiB or smaller")
     if not image_data:
         raise HTTPException(status_code=400, detail="Empty file uploaded")
 
     # Convert to OpenCV format
     try:
-        pil_image = Image.open(io.BytesIO(image_data))
-        cv_image = _pil_to_cv_image(pil_image)
+        with Image.open(io.BytesIO(image_data)) as pil_image:
+            if pil_image.width * pil_image.height > 25_000_000:
+                raise HTTPException(status_code=413, detail="Image must be 25 megapixels or smaller")
+            cv_image = _pil_to_cv_image(pil_image.convert("RGB"))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid image format: {str(e)}")
 
