@@ -4,7 +4,11 @@ import logging
 import logging.handlers
 from pathlib import Path
 from typing import Dict, Optional, Tuple
-import tkinter as tk
+
+try:
+    import tkinter as tk
+except ImportError:
+    tk = None
 
 # Supported format name mapping to user-friendly display names
 FORMAT_NAME_MAP: Dict[str, str] = {
@@ -189,8 +193,11 @@ def get_logger(name: str = "BarcodeReader") -> logging.Logger:
     return logging.getLogger(name)
 
 
-def copy_to_clipboard(text: str, root: Optional[tk.Tk] = None) -> bool:
+def copy_to_clipboard(text: str, root=None) -> bool:
     """Copy text to system clipboard safely."""
+    if tk is None:
+        # Tkinter not available; cannot copy to clipboard
+        return False
     try:
         if root is not None:
             root.clipboard_clear()
@@ -209,3 +216,4 @@ def copy_to_clipboard(text: str, root: Optional[tk.Tk] = None) -> bool:
         logger = get_logger()
         logger.error(f"Failed to copy to clipboard: {e}")
         return False
+

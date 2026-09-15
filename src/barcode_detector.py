@@ -2,8 +2,6 @@
 
 import time
 from typing import List, Optional, Set, Tuple
-import cv2
-import numpy as np
 
 from src.models import BarcodeResult, DetectionReport, ImageMetrics
 from src.image_processor import ImageProcessor
@@ -11,7 +9,13 @@ from src.utils import get_logger, normalize_barcode_type, validate_barcode_check
 
 logger = get_logger()
 
-# Check available decoding engines
+# Check available decoding engines (conditional for serverless compatibility)
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+
 try:
     import zxingcpp
     HAS_ZXING = True
@@ -78,16 +82,17 @@ class BarcodeDetector:
     def __init__(self):
         self.has_zxing = HAS_ZXING
         self.has_pyzbar = HAS_PYZBAR
+        self.has_cv2 = HAS_CV2
         self.cv_barcode_detector = None
         self.cv_qr_detector = None
 
-        if hasattr(cv2, "barcode") and hasattr(cv2.barcode, "BarcodeDetector"):
+        if self.has_cv2 and hasattr(cv2, "barcode") and hasattr(cv2.barcode, "BarcodeDetector"):
             try:
                 self.cv_barcode_detector = cv2.barcode.BarcodeDetector()
             except Exception as e:
                 logger.debug(f"OpenCV BarcodeDetector init failed: {e}")
 
-        if hasattr(cv2, "QRCodeDetector"):
+        if self.has_cv2 and hasattr(cv2, "QRCodeDetector"):
             try:
                 self.cv_qr_detector = cv2.QRCodeDetector()
             except Exception as e:
@@ -95,7 +100,7 @@ class BarcodeDetector:
 
         logger.info(
             f"BarcodeDetector initialized (ZXing-C++: {self.has_zxing}, "
-            f"PyZBar: {self.has_pyzbar}, OpenCV: {self.cv_barcode_detector is not None})"
+            f"PyZBar: {self.has_pyzbar}, OpenCV: {self.has_cv2 and self.cv_barcode_detector is not None})"
         )
 
     def detect_and_decode(self, image: np.ndarray, fast_mode: bool = False) -> DetectionReport:
