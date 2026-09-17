@@ -251,6 +251,8 @@ async function startCamera() {
   if (!navigator.mediaDevices?.getUserMedia) { setStatus('Live camera is unavailable here. Use Take a photo or upload an image.', true); return; }
   stopCamera(); const epoch = cameraEpoch; $('start-camera').disabled = true; $('stop-camera').hidden = false;
   setStatus('Requesting camera access…'); candidate = ''; candidateCount = 0; cameraCooldown = new Map();
+  // Warm up the serverless function so the first camera frame doesn't hit a cold start
+  fetch('/api').catch(() => {});
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: facingMode }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
     if (epoch !== cameraEpoch || currentPage !== 'scanner') { stream.getTracks().forEach((track) => track.stop()); return; }
@@ -258,7 +260,7 @@ async function startCamera() {
     await video.play(); if (epoch !== cameraEpoch) return;
     $('flip-camera').hidden = false; setStatus('Scanning live · hold the barcode steady');
     stream.getVideoTracks()[0]?.addEventListener('ended', () => { if (epoch === cameraEpoch) { stopCamera(); toast('The camera disconnected. Start it again to continue.'); } });
-    await cameraTick(epoch);
+    cameraTick(epoch);
   } catch (error) {
     if (epoch !== cameraEpoch) return;
     stopCamera();
@@ -269,40 +271,50 @@ async function startCamera() {
 
 async function cameraTick(epoch) {
   if (epoch !== cameraEpoch || !cameraStream) return;
+  // Schedule next tick immediately (parallel to current API call) so camera stays responsive
+  if (epoch === cameraEpoch) cameraTimer = setTimeout(() => cameraTick(epoch), 1200);
   const video = $('camera-video');
   try {
     if (video.videoWidth && video.readyState >= 2) {
-      const canvas = document.createElement('canvas'); const ratio = Math.min(1, 1600 / video.videoWidth);
+      const canvas = document.createElement('canvas'); const ratio = Math.min(1, 1280 / video.videoWidth);
       canvas.width = Math.round(video.videoWidth * ratio); canvas.height = Math.round(video.videoHeight * ratio);
       canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', .88));
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', .85));
       if (epoch !== cameraEpoch || !blob) return;
       cameraController = new AbortController();
-      const timeout = setTimeout(() => cameraController?.abort(), 20000);
+      // 8s timeout — fast failure so stale frames don't pile up
+      const timeout = setTimeout(() => cameraController?.abort(), 8000);
       let report;
       try { report = await scanBlob(blob, 'camera.jpg', true, false, cameraController.signal); }
-      finally { clearTimeout(timeout); }
+      finally { clearTimeout(timeout); cameraController = null; }
       if (epoch !== cameraEpoch) return;
       const key = report.results.map((r) => r.barcode_type + ':' + r.data).sort().join('|');
       candidateCount = key && key === candidate ? candidateCount + 1 : 1; candidate = key;
       const now = Date.now();
       for (const [oldKey, last] of cameraCooldown) if (now - last > 30000) cameraCooldown.delete(oldKey);
-      if (key && candidateCount >= 2 && now - (cameraCooldown.get(key) || 0) >= 8000) {
+      if (key && candidateCount >= 1 && now - (cameraCooldown.get(key) || 0) >= 8000) {
+        // Show result immediately on first detection — no need for 2 consecutive frames
         if (user) {
-          cameraController = new AbortController();
-          const saveTimeout = setTimeout(() => cameraController?.abort(), 20000);
-          try { report = await scanBlob(blob, 'camera.jpg', true, true, cameraController.signal); }
+          const saveCtrl = new AbortController();
+          const saveTimeout = setTimeout(() => saveCtrl.abort(), 8000);
+          try { report = await scanBlob(blob, 'camera.jpg', true, true, saveCtrl.signal); }
+          catch { /* save failed silently, show unsaved result */ }
           finally { clearTimeout(saveTimeout); }
         }
         if (epoch !== cameraEpoch) return;
-        cameraCooldown.set(key, now); renderResults(report); setStatus('Code decoded · ready for the next barcode');
-      } else if (!key) { setStatus('Scanning live · hold the barcode steady'); }
+        cameraCooldown.set(key, now); renderResults(report); setStatus('✓ Code decoded · scanning for next barcode');
+      } else if (key && candidateCount < 1) {
+        setStatus('Barcode detected · verifying…');
+      } else if (!key) {
+        setStatus('Scanning live · hold the barcode steady');
+      }
     }
   } catch (error) {
     if (epoch !== cameraEpoch) return;
-    stopCamera(); setStatus(error.name === 'AbortError' ? 'The scan timed out. Start the camera again to retry.' : error.message, true); return;
+    // On timeout/abort, just continue scanning rather than stopping entirely
+    if (error.name === 'AbortError') { setStatus('Scanning live · hold the barcode steady'); return; }
+    stopCamera(); setStatus(error.message, true);
   }
-  if (epoch === cameraEpoch) cameraTimer = setTimeout(() => cameraTick(epoch), 1000);
 }
 
 async function sample(path) {
