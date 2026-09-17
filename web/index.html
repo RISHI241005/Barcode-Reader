@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111b20">
+  <meta name="description" content="Scan barcodes and QR codes with your camera or an image. Find products, keep private scan history, and export your results.">
+  <title>Barcode Reader</title>
+  <link rel="icon" href="/web/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/web/styles.css">
+  <script type="module" src="/web/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="/"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 8V3h5M24 3h5v5M29 24v5h-5M8 29H3v-5M9 10v12M13 10v12M18 10v12M23 10v12"/></svg><span>Barcode<span class="brand-second">Reader</span></span></a>
+      <p class="nav-label">WORKSPACE</p>
+      <nav aria-label="Main navigation">
+        <button class="nav-item selected" data-page="scanner"><span class="nav-icon">⌗</span> Scanner <span class="nav-dot"></span></button>
+        <button class="nav-item" data-page="history"><span class="nav-icon">↺</span> Scan history</button>
+        <button class="nav-item" data-page="catalog"><span class="nav-icon">▦</span> Product catalog</button>
+        <button class="nav-item" data-page="analytics"><span class="nav-icon">▥</span> Analytics</button>
+        <button class="nav-item" data-page="admin" id="admin-nav" hidden><span class="nav-icon">◇</span> Administration</button>
+      </nav>
+      <div class="sidebar-bottom"><div class="engine-label"><span class="status-dot"></span> ZXing-C++ engine</div><p>Barcodes & QR codes<br>One workspace.</p><button class="nav-item" data-page="account"><span class="nav-icon">◎</span> My account</button><span class="version">BARCODE READER · 1.0</span></div>
+    </aside>
+    <div class="main-shell">
+      <header class="topbar"><span class="breadcrumb">Workspace <span>/</span> <strong id="breadcrumb">Scanner</strong></span><div class="topbar-actions"><span class="user-label" id="user-label">Guest workspace</span><button class="button small" id="auth-button">Sign in</button></div></header>
+      <main>
+        <section class="page" id="page-scanner">
+          <div class="page-heading"><div><p class="eyebrow">CAPTURE & DECODE</p><h1>Scan a barcode.</h1><p class="subheading">Point your camera or drop an image. We’ll read the rest.</p></div><span class="chip"><span class="status-dot"></span> Ready to scan</span></div>
+          <div class="scanner-grid">
+            <div class="scan-card panel">
+              <div class="card-top"><div class="mode-switch" role="group" aria-label="Scan source"><button id="image-mode" class="mode active" aria-pressed="true">Image upload</button><button id="camera-mode" class="mode" aria-pressed="false">Live camera</button></div><span class="muted small-text">13+ formats</span></div>
+              <div class="scan-stage" id="dropzone">
+                <div class="scan-corners" aria-hidden="true"></div>
+                <div id="upload-empty" class="upload-empty"><svg viewBox="0 0 64 64" aria-hidden="true"><path d="M12 23V12h11M41 12h11v11M52 41v11H41M23 52H12V41M22 23v18M28 23v18M36 23v18M43 23v18"/></svg><h2>Your next scan starts here</h2><p>Drag & drop a barcode or QR image</p><button class="button primary" id="choose-image">Choose an image <span aria-hidden="true">↗</span></button><span class="upload-hint">JPG, PNG, WEBP, BMP, TIFF · up to 20 MB</span></div>
+                <canvas id="image-preview" hidden aria-label="Uploaded image with detected barcode locations"></canvas>
+                <video id="camera-video" playsinline muted hidden aria-label="Live camera view"></video>
+                <div id="camera-empty" class="upload-empty" hidden><svg viewBox="0 0 64 64" aria-hidden="true"><path d="M9 21h11l5-8h14l5 8h11v30H9z"/><circle cx="32" cy="35" r="10"/></svg><h2>Bring the barcode into view</h2><p>Use your camera to scan continuously.</p><button class="button primary" id="start-camera">Start camera</button><span class="upload-hint">Camera access is requested only when you start.</span></div>
+                <div class="scan-overlay" id="scan-overlay" hidden><span class="spinner"></span><span>Reading the image…</span></div>
+              </div>
+              <div class="scan-footer"><div class="scan-state"><span class="status-dot" id="scan-status-dot"></span><span id="scan-status" role="status" aria-live="polite">Waiting for an image</span></div><div class="scan-controls"><button class="text-button" id="another-image" hidden>Change image</button><button class="text-button" id="flip-camera" hidden>Switch camera</button><button class="text-button danger" id="stop-camera" hidden>Stop camera</button></div></div>
+              <input id="file-input" type="file" accept="image/*" hidden>
+              <input id="photo-input" type="file" accept="image/*" capture="environment" hidden>
+              <div class="scan-options"><button class="text-button" id="take-photo">Take a photo <span aria-hidden="true">↗</span></button><span>or try a sample</span><button class="sample-button" id="demo-barcode">EAN-13</button><button class="sample-button" id="demo-qr">QR code</button></div>
+            </div>
+            <aside class="results-card panel"><div class="card-title"><h2>Scan results</h2><span class="count-badge" id="result-count">0</span></div><div id="results" class="results-body"><div class="results-empty"><div class="empty-symbol">⌁</div><h3>Nothing decoded yet</h3><p>Your barcode data, format, and validation will appear here.</p></div></div><div class="results-bottom"><span class="muted small-text" id="save-status">Sign in to save scans across devices.</span></div></aside>
+          </div>
+          <div class="scanner-notes"><div><span class="note-number">01</span><p><strong>Keep it clear</strong><span>Good lighting and a sharp image help.</span></p></div><div><span class="note-number">02</span><p><strong>Read every code</strong><span>Multiple barcodes in one image are supported.</span></p></div><div><span class="note-number">03</span><p><strong>Keep your history</strong><span>Sign in for private records and exports.</span></p></div></div>
+        </section>
+        <section class="page" id="page-history" hidden><div class="page-heading"><div><p class="eyebrow">YOUR RECORDS</p><h1>Scan history</h1><p class="subheading">Find, review, and export your saved scans.</p></div><div class="button-group"><button class="button" id="export-csv">Export CSV</button><button class="button" id="export-json">Export JSON</button></div></div><div class="toolbar"><label class="search"><span aria-hidden="true">⌕</span><input id="history-search" type="search" placeholder="Search data or barcode format" aria-label="Search scan history"></label><label class="scope-control" id="history-scope-label" hidden>View <select id="history-scope"><option value="personal">My scans</option><option value="system">All users’ scans</option></select></label><button class="button small" id="refresh-history">Refresh</button></div><div id="history-content" class="panel"></div><div class="pagination"><span id="history-total" class="muted"></span><div class="button-group"><button class="button small" id="history-prev">Previous</button><button class="button small" id="history-next">Next</button></div></div></section>
+        <section class="page" id="page-catalog" hidden><div class="page-heading"><div><p class="eyebrow">PRODUCT INTELLIGENCE</p><h1>Product catalog</h1><p class="subheading">Look up food products by their barcode.</p></div><a class="text-button external" href="https://world.openfoodfacts.org" target="_blank" rel="noopener noreferrer">Open Food Facts ↗</a></div><form id="lookup-form" class="panel lookup-form"><label for="lookup-barcode">Product barcode</label><div class="lookup-row"><input id="lookup-barcode" inputmode="numeric" pattern="[0-9]{8,14}" minlength="8" maxlength="14" placeholder="e.g. 3017620422003" required><button class="button primary" type="submit">Look up product</button></div><p class="muted small-text">Availability depends on the community catalog. QR links aren’t product identifiers.</p></form><div id="product-result" aria-live="polite"></div><div class="section-heading"><h2>Recently looked up</h2><span class="muted small-text">Shared product cache</span></div><div id="catalog-content" class="product-grid"></div></section>
+        <section class="page" id="page-analytics" hidden><div class="page-heading"><div><p class="eyebrow">SCAN INSIGHTS</p><h1>Analytics</h1><p class="subheading">A closer look at your scanning activity.</p></div><label class="scope-control" id="analytics-scope-label" hidden>View <select id="analytics-scope"><option value="personal">My scans</option><option value="system">All users’ scans</option></select></label></div><div id="analytics-content"></div></section>
+        <section class="page" id="page-admin" hidden><div class="page-heading"><div><p class="eyebrow">ADMINISTRATOR WORKSPACE</p><h1>Administration</h1><p class="subheading">Manage accounts and review security activity.</p></div><button class="button small" id="refresh-admin">Refresh</button></div><div class="section-heading"><h2>User accounts</h2><span class="muted small-text">At least one active administrator must remain.</span></div><div class="panel" id="admin-users"></div><div class="section-heading"><h2>Security audit log</h2><span class="muted small-text">Latest 300 events</span></div><div class="panel" id="admin-audit"></div></section>
+        <section class="page" id="page-account" hidden><div class="page-heading"><div><p class="eyebrow">YOUR WORKSPACE</p><h1>My account</h1><p class="subheading">Your profile and account security.</p></div></div><div id="account-content"></div></section>
+      </main>
+      <footer class="site-footer"><span>Barcode Reader</span><span>Image & camera scanning · Private account history</span></footer>
+    </div>
+  </div>
+  <dialog id="auth-dialog" class="modal"><form method="dialog" class="modal-close"><button aria-label="Close sign-in window">×</button></form><p class="eyebrow">YOUR BARCODE WORKSPACE</p><h2 id="auth-title">Welcome back.</h2><p class="muted" id="auth-description">Sign in to keep your scans in one place.</p><div class="auth-tabs"><button class="mode active" id="login-tab" type="button">Sign in</button><button class="mode" id="register-tab" type="button">Create account</button></div><form id="auth-form"><label id="username-label" hidden>Username<input id="auth-username" name="username" minlength="3" maxlength="50" pattern="[a-zA-Z0-9_]+" autocomplete="username" placeholder="Your username"></label><label id="email-label">Email or username<input id="auth-email" name="email" required maxlength="255" autocomplete="username" placeholder="you@example.com"></label><label>Password<input id="auth-password" name="password" type="password" required maxlength="72" autocomplete="current-password" placeholder="Enter your password"></label><p class="small-text muted" id="password-hint" hidden>At least 10 characters. Use a unique password.</p><p class="admin-setup-note" id="admin-setup-note" hidden>Private administrator setup. Create your account to activate administrator access.</p><p id="auth-error" class="form-error" role="alert"></p><button id="auth-submit" class="button primary full-width" type="submit">Sign in</button></form></dialog>
+  <dialog id="confirm-dialog" class="modal"><h2 id="confirm-title">Confirm action</h2><p id="confirm-message" class="muted"></p><div class="button-group"><button id="confirm-cancel" class="button">Cancel</button><button id="confirm-ok" class="button primary">Confirm</button></div></dialog>
+  <div id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

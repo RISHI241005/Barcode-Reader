@@ -4,16 +4,35 @@ Exposes /detect-barcode endpoint for barcode/QR code detection from images.
 Uses lazy detector initialization to handle serverless import issues.
 """
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
-from PIL import Image
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from PIL import Image, ImageOps
+from pathlib import Path
+from src.web_api import router, optional_user, save_scan_results
 import io
 import logging
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Barcode Reader API", version="1.0.0")
+app.include_router(router)
+WEB_DIR = Path(__file__).resolve().parent / 'web'
+app.mount('/web', StaticFiles(directory=WEB_DIR), name='web')
+
+
+@app.middleware('http')
+async def security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['X-Frame-Options'] = 'DENY'
+    if request.url.path.startswith('/api/'):
+        response.headers['Cache-Control'] = 'no-store'
+    if request.url.path == '/':
+        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data: https://images.openfoodfacts.org; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    return response
 
 app.add_middleware(
     CORSMiddleware,
@@ -68,11 +87,12 @@ def health_check():
 
 @app.get("/", include_in_schema=False)
 def root():
-    return RedirectResponse("/docs")
+    return FileResponse(WEB_DIR / 'index.html')
 
 
 @app.post("/api/detect-barcode")
-def detect_barcode(file: UploadFile = File(...)):
+def detect_barcode(request: Request, file: UploadFile = File(...), fast_mode: bool = False,
+                   save: bool = True, source: str = 'image', user=Depends(optional_user)):
     """Detect and decode barcodes/QR codes from an uploaded image file.
 
     Returns detection results including barcode type, data, and validation status.
@@ -92,7 +112,9 @@ def detect_barcode(file: UploadFile = File(...)):
         with Image.open(io.BytesIO(image_data)) as pil_image:
             if pil_image.width * pil_image.height > 25_000_000:
                 raise HTTPException(status_code=413, detail="Image must be 25 megapixels or smaller")
-            cv_image = _pil_to_cv_image(pil_image.convert("RGB"))
+            normalized = ImageOps.exif_transpose(pil_image).convert('RGB')
+            normalized.thumbnail((2500, 2500))
+            cv_image = _pil_to_cv_image(normalized)
     except HTTPException:
         raise
     except Exception as e:
@@ -107,7 +129,7 @@ def detect_barcode(file: UploadFile = File(...)):
             detail="Barcode detector unavailable. Check serverless environment compatibility.",
         )
 
-    report = detector.detect_and_decode(cv_image, fast_mode=False)
+    report = detector.detect_and_decode(cv_image, fast_mode=fast_mode)
 
     if not report.success or not report.results:
         return {
@@ -116,6 +138,8 @@ def detect_barcode(file: UploadFile = File(...)):
             "message": "No barcodes detected in the image.",
             "engine_used": getattr(report, 'engine_used', 'Unknown'),
             "processing_time_ms": getattr(report, 'processing_time_ms', 0.0),
+            "image_width": cv_image.shape[1],
+            "image_height": cv_image.shape[0],
         }
 
     results = []
@@ -134,12 +158,18 @@ def detect_barcode(file: UploadFile = File(...)):
             "processing_method": result.processing_method,
         })
 
+    if user and save:
+        save_scan_results(user, results, 'camera' if source == 'camera' else 'image',
+                          file.filename or 'image', report.processing_time_ms)
     return {
         "success": True,
         "results": results,
         "engine_used": getattr(report, 'engine_used', 'Unknown'),
         "processing_time_ms": getattr(report, 'processing_time_ms', 0.0),
         "stages_attempted": getattr(report, 'stages_attempted', []),
+        "image_width": cv_image.shape[1],
+        "image_height": cv_image.shape[0],
+        "saved": bool(user and save),
     }
 
 

@@ -9,6 +9,8 @@ dependencies = [
     "numpy>=1.26,<3",
     "opencv-python-headless>=4.10,<5",
     "zxing-cpp>=3.0.0",
+    "bcrypt>=4.2,<6",
+    "psycopg[binary]>=3.2,<4",
 ]
 
 [tool.vercel]
