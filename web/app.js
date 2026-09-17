@@ -53,6 +53,11 @@ let scanning = false, bitmap = null, cameraStream = null, cameraEpoch = 0, camer
 let facingMode = 'environment', candidate = '', candidateCount = 0, cameraController = null;
 let cameraCooldown = new Map(), historyOffset = 0, historyRows = [], historyTotal = 0, historyRequest = 0;
 let toastTimer, searchTimer, catalogRequest = 0;
+let cameraActive = false, noDetectCount = 0, nativeRafId = null;
+
+// Browser-native barcode detector for instant overlay (Chrome/Edge 83+, no network needed)
+let nativeDetector = null;
+try { if ('BarcodeDetector' in window) nativeDetector = new BarcodeDetector(); } catch {}
 
 function toast(message) {
   $('toast').textContent = message; $('toast').hidden = false;
@@ -237,12 +242,85 @@ function renderResults(report) {
   $('save-status').textContent = report.saved ? '✓ Saved privately to your account.' : user ? 'Live detections save after a stable reading.' : 'Sign in to save scans across devices.';
 }
 
+// Draw green detection boxes on the camera overlay canvas
+function drawCameraOverlay(results, apiW, apiH) {
+  const overlay = $('camera-overlay'), video = $('camera-video');
+  if (!overlay || video.hidden || !video.videoWidth) return;
+  const cw = video.clientWidth, ch = video.clientHeight;
+  overlay.width = cw; overlay.height = ch;
+  const ctx = overlay.getContext('2d');
+  ctx.clearRect(0, 0, cw, ch);
+  if (!results || results.length === 0) return;
+  // Calculate video's actual rendered rect within the element (object-fit: contain adds letterbox)
+  const scale = Math.min(cw / video.videoWidth, ch / video.videoHeight);
+  const rw = video.videoWidth * scale, rh = video.videoHeight * scale;
+  const ox = (cw - rw) / 2, oy = (ch - rh) / 2;
+  // Scale factor from API image space to display space
+  const sx = rw / apiW, sy = rh / apiH;
+  ctx.lineWidth = 2.5;
+  ctx.font = 'bold 12px Inter, sans-serif';
+  for (const r of results) {
+    const dx = ox + r.x * sx, dy = oy + r.y * sy, dw = r.width * sx, dh = r.height * sy;
+    // Glowing green fill
+    ctx.shadowColor = '#39ff6a'; ctx.shadowBlur = 14;
+    ctx.strokeStyle = '#39ff6a'; ctx.strokeRect(dx, dy, dw, dh);
+    ctx.fillStyle = 'rgba(57,255,106,0.10)'; ctx.fillRect(dx, dy, dw, dh);
+    // Type label above the box
+    ctx.shadowBlur = 6; ctx.fillStyle = '#39ff6a';
+    ctx.fillText(r.barcode_type, dx + 4, Math.max(dy - 6, oy + 14));
+    ctx.shadowBlur = 0;
+  }
+}
+
+function clearCameraOverlay() {
+  const overlay = $('camera-overlay');
+  if (!overlay) return;
+  overlay.getContext('2d').clearRect(0, 0, overlay.width, overlay.height);
+}
+
+// Native BarcodeDetector loop — runs every animation frame, gives instant visual feedback
+async function runNativeLoop(epoch) {
+  if (epoch !== cameraEpoch || !cameraStream || !nativeDetector) return;
+  const video = $('camera-video');
+  if (video.readyState >= 2 && video.videoWidth) {
+    try {
+      const codes = await nativeDetector.detect(video);
+      if (epoch !== cameraEpoch) return;
+      if (codes.length > 0) {
+        // Draw using native bbox (already in video natural coordinate space)
+        const overlay = $('camera-overlay'), cw = video.clientWidth, ch = video.clientHeight;
+        overlay.width = cw; overlay.height = ch;
+        const ctx = overlay.getContext('2d');
+        ctx.clearRect(0, 0, cw, ch);
+        const scale = Math.min(cw / video.videoWidth, ch / video.videoHeight);
+        const rw = video.videoWidth * scale, rh = video.videoHeight * scale;
+        const ox = (cw - rw) / 2, oy = (ch - rh) / 2;
+        ctx.lineWidth = 2.5; ctx.font = 'bold 12px Inter, sans-serif';
+        for (const code of codes) {
+          const b = code.boundingBox;
+          const dx = ox + b.x * scale, dy = oy + b.y * scale, dw = b.width * scale, dh = b.height * scale;
+          ctx.shadowColor = '#39ff6a'; ctx.shadowBlur = 14;
+          ctx.strokeStyle = '#39ff6a'; ctx.strokeRect(dx, dy, dw, dh);
+          ctx.fillStyle = 'rgba(57,255,106,0.10)'; ctx.fillRect(dx, dy, dw, dh);
+          ctx.shadowBlur = 6; ctx.fillStyle = '#39ff6a';
+          ctx.fillText(code.format?.replace(/_/g, ' ').toUpperCase() || 'CODE', dx + 4, Math.max(dy - 6, oy + 14));
+          ctx.shadowBlur = 0;
+        }
+      } else { clearCameraOverlay(); }
+    } catch { /* native detection not available on this frame */ }
+  }
+  if (epoch === cameraEpoch) nativeRafId = requestAnimationFrame(() => runNativeLoop(epoch));
+}
+
 function stopCamera() {
   cameraEpoch++; clearTimeout(cameraTimer); cameraTimer = null;
-  cameraController?.abort(); cameraController = null;
+  if (nativeRafId) { cancelAnimationFrame(nativeRafId); nativeRafId = null; }
+  cameraController?.abort(); cameraController = null; cameraActive = false; noDetectCount = 0;
   cameraStream?.getTracks().forEach((track) => track.stop()); cameraStream = null;
+  clearCameraOverlay();
   if (typeof document === 'undefined') return;
   $('camera-video').srcObject = null; $('camera-video').hidden = true;
+  $('camera-overlay').hidden = true;
   $('stop-camera').hidden = true; $('flip-camera').hidden = true; $('start-camera').disabled = false;
   if ($('camera-mode').classList.contains('active')) { $('camera-empty').hidden = false; setStatus('Camera is off'); }
 }
@@ -258,8 +336,11 @@ async function startCamera() {
     if (epoch !== cameraEpoch || currentPage !== 'scanner') { stream.getTracks().forEach((track) => track.stop()); return; }
     cameraStream = stream; const video = $('camera-video'); video.srcObject = stream; video.hidden = false; $('camera-empty').hidden = true;
     await video.play(); if (epoch !== cameraEpoch) return;
+    $('camera-overlay').hidden = false;
     $('flip-camera').hidden = false; setStatus('Scanning live · hold the barcode steady');
     stream.getVideoTracks()[0]?.addEventListener('ended', () => { if (epoch === cameraEpoch) { stopCamera(); toast('The camera disconnected. Start it again to continue.'); } });
+    // Start instant native overlay loop (runs on every animation frame)
+    if (nativeDetector) runNativeLoop(epoch);
     cameraTick(epoch);
   } catch (error) {
     if (epoch !== cameraEpoch) return;
@@ -271,18 +352,20 @@ async function startCamera() {
 
 async function cameraTick(epoch) {
   if (epoch !== cameraEpoch || !cameraStream) return;
-  // Schedule next tick immediately (parallel to current API call) so camera stays responsive
+  // Schedule next tick in parallel so camera keeps checking even during slow API calls
   if (epoch === cameraEpoch) cameraTimer = setTimeout(() => cameraTick(epoch), 1200);
+  // Guard: skip if a server request is already in flight
+  if (cameraActive) return;
+  cameraActive = true;
   const video = $('camera-video');
   try {
     if (video.videoWidth && video.readyState >= 2) {
       const canvas = document.createElement('canvas'); const ratio = Math.min(1, 1280 / video.videoWidth);
       canvas.width = Math.round(video.videoWidth * ratio); canvas.height = Math.round(video.videoHeight * ratio);
       canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', .85));
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', .82));
       if (epoch !== cameraEpoch || !blob) return;
       cameraController = new AbortController();
-      // 8s timeout — fast failure so stale frames don't pile up
       const timeout = setTimeout(() => cameraController?.abort(), 8000);
       let report;
       try { report = await scanBlob(blob, 'camera.jpg', true, false, cameraController.signal); }
@@ -293,28 +376,39 @@ async function cameraTick(epoch) {
       const now = Date.now();
       for (const [oldKey, last] of cameraCooldown) if (now - last > 30000) cameraCooldown.delete(oldKey);
       if (key && candidateCount >= 1 && now - (cameraCooldown.get(key) || 0) >= 8000) {
-        // Show result immediately on first detection — no need for 2 consecutive frames
+        // Barcode confirmed — save if logged in
         if (user) {
           const saveCtrl = new AbortController();
           const saveTimeout = setTimeout(() => saveCtrl.abort(), 8000);
           try { report = await scanBlob(blob, 'camera.jpg', true, true, saveCtrl.signal); }
-          catch { /* save failed silently, show unsaved result */ }
+          catch { /* save failed silently */ }
           finally { clearTimeout(saveTimeout); }
         }
         if (epoch !== cameraEpoch) return;
-        cameraCooldown.set(key, now); renderResults(report); setStatus('✓ Code decoded · scanning for next barcode');
-      } else if (key && candidateCount < 1) {
-        setStatus('Barcode detected · verifying…');
-      } else if (!key) {
-        setStatus('Scanning live · hold the barcode steady');
+        // Draw server-confirmed green boxes (overwrites native overlay with exact positions)
+        drawCameraOverlay(report.results, report.image_width, report.image_height);
+        cameraCooldown.set(key, now); renderResults(report);
+        setStatus('✓ Code decoded · scanning for next barcode'); noDetectCount = 0;
+      } else if (key) {
+        // Barcode visible but in cooldown — show box from server result
+        drawCameraOverlay(report.results, report.image_width, report.image_height);
+        noDetectCount = 0;
+      } else {
+        // No barcode found
+        noDetectCount++;
+        if (!nativeDetector) clearCameraOverlay(); // only clear if no native loop running
+        if (noDetectCount >= 4) {
+          setStatus('Not clear · move closer or improve lighting', true);
+        } else {
+          setStatus('Scanning live · hold the barcode steady');
+        }
       }
     }
   } catch (error) {
     if (epoch !== cameraEpoch) return;
-    // On timeout/abort, just continue scanning rather than stopping entirely
     if (error.name === 'AbortError') { setStatus('Scanning live · hold the barcode steady'); return; }
     stopCamera(); setStatus(error.message, true);
-  }
+  } finally { cameraActive = false; }
 }
 
 async function sample(path) {

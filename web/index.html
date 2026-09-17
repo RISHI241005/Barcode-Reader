@@ -36,6 +36,7 @@
                 <div id="upload-empty" class="upload-empty"><svg viewBox="0 0 64 64" aria-hidden="true"><path d="M12 23V12h11M41 12h11v11M52 41v11H41M23 52H12V41M22 23v18M28 23v18M36 23v18M43 23v18"/></svg><h2>Your next scan starts here</h2><p>Drag & drop a barcode or QR image</p><button class="button primary" id="choose-image">Choose an image <span aria-hidden="true">↗</span></button><span class="upload-hint">JPG, PNG, WEBP, BMP, TIFF · up to 20 MB</span></div>
                 <canvas id="image-preview" hidden aria-label="Uploaded image with detected barcode locations"></canvas>
                 <video id="camera-video" playsinline muted hidden aria-label="Live camera view"></video>
+                <canvas id="camera-overlay" hidden aria-hidden="true"></canvas>
                 <div id="camera-empty" class="upload-empty" hidden><svg viewBox="0 0 64 64" aria-hidden="true"><path d="M9 21h11l5-8h14l5 8h11v30H9z"/><circle cx="32" cy="35" r="10"/></svg><h2>Bring the barcode into view</h2><p>Use your camera to scan continuously.</p><button class="button primary" id="start-camera">Start camera</button><span class="upload-hint">Camera access is requested only when you start.</span></div>
                 <div class="scan-overlay" id="scan-overlay" hidden><span class="spinner"></span><span>Reading the image…</span></div>
               </div>
