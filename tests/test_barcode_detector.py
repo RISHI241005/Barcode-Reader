@@ -1,14 +1,20 @@
 """Comprehensive unit and integration tests for BarcodeDetector (Part 2)."""
 
 from pathlib import Path
-import pytest
-import numpy as np
-import cv2
+import pytest  # pyrefly: ignore [missing-import] # type: ignore
+import numpy as np  # pyrefly: ignore [missing-import] # type: ignore
+import cv2  # pyrefly: ignore [missing-import] # type: ignore
 
-from src.barcode_detector import BarcodeDetector, _is_duplicate
-from src.image_processor import ImageProcessor
-from src.models import BarcodeResult
-from src.utils import normalize_barcode_type, validate_barcode_checksum
+try:
+    from src.barcode_detector import BarcodeDetector, _is_duplicate  # pyrefly: ignore [missing-import] # type: ignore
+    from src.image_processor import ImageProcessor  # pyrefly: ignore [missing-import] # type: ignore
+    from src.models import BarcodeResult  # pyrefly: ignore [missing-import] # type: ignore
+    from src.utils import normalize_barcode_type, validate_barcode_checksum  # pyrefly: ignore [missing-import] # type: ignore
+except (ImportError, ModuleNotFoundError):
+    from barcode_detector import BarcodeDetector, _is_duplicate  # pyrefly: ignore [missing-import] # type: ignore
+    from image_processor import ImageProcessor  # pyrefly: ignore [missing-import] # type: ignore
+    from models import BarcodeResult  # pyrefly: ignore [missing-import] # type: ignore
+    from utils import normalize_barcode_type, validate_barcode_checksum  # pyrefly: ignore [missing-import] # type: ignore
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_images"
 
@@ -231,3 +237,20 @@ def test_checksum_validations():
     # QR Code (Not Applicable)
     v, d = validate_barcode_checksum("QR Code", "https://example.com")
     assert v == "Not Available"
+
+
+def test_simultaneous_fast_mode_multiple_codes(detector):
+    """Test 12: Verify fast_mode=True (camera scanning mode) decodes multiple barcodes simultaneously without early exit."""
+    img_path = SAMPLE_DIR / "multiple_barcodes_sample.png"
+    assert img_path.exists()
+    
+    img = ImageProcessor.load_image(img_path)
+    assert img is not None
+    
+    report = detector.detect_and_decode(img, fast_mode=True)
+    assert report.success is True
+    assert report.count >= 3
+    types = [r.barcode_type for r in report.results]
+    assert "QR Code" in types
+    assert "EAN-13" in types
+    assert "Code 128" in types

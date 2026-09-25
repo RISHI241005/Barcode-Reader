@@ -12,13 +12,19 @@ import threading
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 
-import cv2
-import numpy as np
+import cv2  # pyrefly: ignore [missing-import] # type: ignore
+import numpy as np  # pyrefly: ignore [missing-import] # type: ignore
 
-from src.barcode_detector import BarcodeDetector
-from src.image_processor import ImageProcessor
-from src.models import BarcodeResult, DetectionReport
-from src.utils import get_logger
+try:
+    from src.barcode_detector import BarcodeDetector  # pyrefly: ignore [missing-import] # type: ignore
+    from src.image_processor import ImageProcessor  # pyrefly: ignore [missing-import] # type: ignore
+    from src.models import BarcodeResult, DetectionReport  # pyrefly: ignore [missing-import] # type: ignore
+    from src.utils import get_logger  # pyrefly: ignore [missing-import] # type: ignore
+except (ImportError, ModuleNotFoundError):
+    from barcode_detector import BarcodeDetector  # pyrefly: ignore [missing-import] # type: ignore
+    from image_processor import ImageProcessor  # pyrefly: ignore [missing-import] # type: ignore
+    from models import BarcodeResult, DetectionReport  # pyrefly: ignore [missing-import] # type: ignore
+    from utils import get_logger  # pyrefly: ignore [missing-import] # type: ignore
 
 logger = get_logger()
 
@@ -107,6 +113,7 @@ class CameraScanner:
         # Callbacks
         self.on_frame_ready: Optional[Callable[[np.ndarray, List[BarcodeResult]], None]] = None
         self.on_barcode_confirmed: Optional[Callable[[BarcodeResult], None]] = None
+        self.on_barcodes_confirmed: Optional[Callable[[List[BarcodeResult]], None]] = None
         self.on_state_changed: Optional[Callable[[CameraState, Optional[str]], None]] = None
 
     def _set_state(self, new_state: CameraState, error: Optional[str] = None):
@@ -229,12 +236,18 @@ class CameraScanner:
 
                     # Process stability and cooldown triggers
                     confirmed_barcodes = self._update_stability_and_cooldown(current_results, now)
-                    for confirmed in confirmed_barcodes:
-                        if self.on_barcode_confirmed:
+                    if confirmed_barcodes:
+                        if self.on_barcodes_confirmed:
                             try:
-                                self.on_barcode_confirmed(confirmed)
+                                self.on_barcodes_confirmed(confirmed_barcodes)
                             except Exception as e:
-                                logger.error(f"Error in on_barcode_confirmed callback: {e}")
+                                logger.error(f"Error in on_barcodes_confirmed callback: {e}")
+                        for confirmed in confirmed_barcodes:
+                            if self.on_barcode_confirmed:
+                                try:
+                                    self.on_barcode_confirmed(confirmed)
+                                except Exception as e:
+                                    logger.error(f"Error in on_barcode_confirmed callback: {e}")
 
                 # 2. Render Live Bounding Boxes & Reticle Guide
                 display_frame = frame.copy()
@@ -243,7 +256,7 @@ class CameraScanner:
                         display_frame, current_results
                     )
                 else:
-                    # Draw subtle scanning reticle guide
+                    # Draw subtle multi-code scanning reticle guide
                     self._draw_reticle_guide(display_frame)
 
                 with self._lock:
@@ -303,17 +316,17 @@ class CameraScanner:
         return confirmed
 
     def _draw_reticle_guide(self, frame: np.ndarray):
-        """Draw an unobtrusive scanning target guide box in the center of the frame."""
+        """Draw an unobtrusive multi-code scanning target guide covering the capture area."""
         h, w = frame.shape[:2]
-        box_w = int(w * 0.65)
-        box_h = int(h * 0.45)
+        box_w = int(w * 0.82)
+        box_h = int(h * 0.65)
         x1 = (w - box_w) // 2
         y1 = (h - box_h) // 2
         x2 = x1 + box_w
         y2 = y1 + box_h
 
         # Draw corner brackets
-        corner_len = 24
+        corner_len = 28
         color = (180, 180, 180)
         thickness = 2
 

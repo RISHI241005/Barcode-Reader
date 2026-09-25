@@ -1,7 +1,7 @@
 [project]
 name = "barcode-reader-api"
 version = "1.0.0"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115,<1",
     "python-multipart>=0.0.9",

@@ -2,11 +2,15 @@
 
 import time
 from unittest.mock import MagicMock, patch
-import numpy as np
-import pytest
+import numpy as np  # pyrefly: ignore [missing-import] # type: ignore
+import pytest  # pyrefly: ignore [missing-import] # type: ignore
 
-from src.camera_scanner import CameraScanner, CameraState, detect_available_cameras
-from src.models import BarcodeResult, DetectionReport
+try:
+    from src.camera_scanner import CameraScanner, CameraState, detect_available_cameras  # pyrefly: ignore [missing-import] # type: ignore
+    from src.models import BarcodeResult, DetectionReport  # pyrefly: ignore [missing-import] # type: ignore
+except (ImportError, ModuleNotFoundError):
+    from camera_scanner import CameraScanner, CameraState, detect_available_cameras  # pyrefly: ignore [missing-import] # type: ignore
+    from models import BarcodeResult, DetectionReport  # pyrefly: ignore [missing-import] # type: ignore
 
 
 def test_camera_scanner_initial_state():
@@ -84,3 +88,37 @@ def test_camera_scanner_error_handling():
         time.sleep(0.1)
         assert scanner.state in (CameraState.ERROR, CameraState.STOPPED)
         scanner.stop()
+
+
+def test_camera_scanner_batch_confirmation_callback():
+    """Test 6: Multiple simultaneous barcodes in consecutive frames trigger on_barcodes_confirmed with full batch."""
+    scanner = CameraScanner(stability_threshold=2, scan_cooldown_seconds=5.0)
+    batch_history = []
+    single_history = []
+
+    scanner.on_barcodes_confirmed = lambda batch: batch_history.append(batch)
+    scanner.on_barcode_confirmed = lambda code: single_history.append(code)
+
+    code1 = BarcodeResult(barcode_type="QR Code", raw_type="QRCODE", data="https://example.com/item1")
+    code2 = BarcodeResult(barcode_type="EAN-13", raw_type="EAN13", data="8901234567890")
+
+    # Frame 1: stability count becomes 1 (threshold is 2)
+    confirmed1 = scanner._update_stability_and_cooldown([code1, code2], current_time=100.0)
+    assert len(confirmed1) == 0
+
+    # Frame 2: stability count reaches 2 -> both confirmed together
+    confirmed2 = scanner._update_stability_and_cooldown([code1, code2], current_time=100.1)
+    assert len(confirmed2) == 2
+    assert confirmed2[0].data == code1.data
+    assert confirmed2[1].data == code2.data
+
+    # Emulate callback execution
+    if scanner.on_barcodes_confirmed:
+        scanner.on_barcodes_confirmed(confirmed2)
+    for c in confirmed2:
+        if scanner.on_barcode_confirmed:
+            scanner.on_barcode_confirmed(c)
+
+    assert len(batch_history) == 1
+    assert len(batch_history[0]) == 2
+    assert len(single_history) == 2

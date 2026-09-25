@@ -1,24 +1,29 @@
 """Barcode and QR code detection, decoding, rotation handling, and deduplication engine."""
 
 import time
-import numpy as np
-from typing import List, Optional, Set, Tuple
+import numpy as np  # pyrefly: ignore [missing-import] # type: ignore
+from typing import List, Optional, Tuple
 
-from src.models import BarcodeResult, DetectionReport, ImageMetrics
-from src.image_processor import ImageProcessor
-from src.utils import get_logger, normalize_barcode_type, validate_barcode_checksum
+try:
+    from src.models import BarcodeResult, DetectionReport  # pyrefly: ignore [missing-import] # type: ignore
+    from src.image_processor import ImageProcessor  # pyrefly: ignore [missing-import] # type: ignore
+    from src.utils import get_logger, normalize_barcode_type, validate_barcode_checksum  # pyrefly: ignore [missing-import] # type: ignore
+except (ImportError, ModuleNotFoundError):
+    from models import BarcodeResult, DetectionReport  # pyrefly: ignore [missing-import] # type: ignore
+    from image_processor import ImageProcessor  # pyrefly: ignore [missing-import] # type: ignore
+    from utils import get_logger, normalize_barcode_type, validate_barcode_checksum  # pyrefly: ignore [missing-import] # type: ignore
 
 logger = get_logger()
 
 # Check available decoding engines (conditional for serverless compatibility)
 try:
-    import cv2
+    import cv2  # pyrefly: ignore [missing-import] # type: ignore
     HAS_CV2 = True
 except ImportError:
     HAS_CV2 = False
 
 try:
-    import zxingcpp
+    import zxingcpp  # pyrefly: ignore [missing-import] # type: ignore
     HAS_ZXING = True
 except ImportError:
     HAS_ZXING = False
@@ -29,13 +34,13 @@ try:
     from pathlib import Path
     if sys.platform == "win32":
         try:
-            import pyzbar
+            import pyzbar  # pyrefly: ignore [missing-import] # type: ignore
             pyzbar_dir = Path(pyzbar.__file__).parent
             if hasattr(os, "add_dll_directory"):
                 os.add_dll_directory(str(pyzbar_dir))
         except Exception:
             pass
-    from pyzbar import pyzbar as pyzbar_module
+    from pyzbar import pyzbar as pyzbar_module  # pyrefly: ignore [missing-import] # type: ignore
     HAS_PYZBAR = True
 except Exception:
     HAS_PYZBAR = False
@@ -58,15 +63,36 @@ def _compute_box_iou(box1: Tuple[int, int, int, int], box2: Tuple[int, int, int,
 
 def _is_duplicate(r1: BarcodeResult, r2: BarcodeResult) -> bool:
     """Check if two detected results represent the same physical barcode in an image."""
-    if r1.barcode_type != r2.barcode_type or r1.data != r2.data:
+    data_match = (r1.data == r2.data)
+    if not data_match:
+        if (r1.data == "0" + r2.data) or (r2.data == "0" + r1.data):
+            data_match = True
+
+    if not data_match:
         return False
+
+    type_match = (r1.barcode_type == r2.barcode_type)
+    if not type_match:
+        ean_upc = {"EAN-13", "UPC-A", "UPC-E", "EAN-8"}
+        qr_family = {"QR Code", "Micro QR Code"}
+        if (r1.barcode_type in ean_upc and r2.barcode_type in ean_upc) or \
+           (r1.barcode_type in qr_family and r2.barcode_type in qr_family) or \
+           (r1.barcode_type == "Barcode" or r2.barcode_type == "Barcode"):
+            type_match = True
+
+    if not type_match:
+        return False
+
+    # If either result lacks valid dimensions, treat matching data and type as duplicate
+    if (r1.width <= 0 or r1.height <= 0) or (r2.width <= 0 or r2.height <= 0):
+        return True
     
     # 1. IoU check
     iou = _compute_box_iou(r1.bounding_box, r2.bounding_box)
     if iou > 0.20:
         return True
 
-    # 2. Center proximity check (within 40px or 40% of box dimension)
+    # 2. Center proximity check (within 40px or 45% of box dimension)
     c1 = r1.center
     c2 = r2.center
     dist = ((c1[0] - c2[0]) ** 2 + (c1[1] - c2[1]) ** 2) ** 0.5
@@ -136,6 +162,8 @@ class BarcodeDetector:
         engine_name = "ZXing-C++" if self.has_zxing else ("PyZBar" if self.has_pyzbar else "OpenCV")
 
         pipeline = ImageProcessor.preprocess_pipeline(image)
+        stages_without_new = 0
+
         for stage_name, proc_img, rot_angle, scale_factor in pipeline:
             stages_attempted.append(stage_name)
             logger.debug(f"Attempting stage: {stage_name} (Rot: {rot_angle}°, Scale: {scale_factor}x)")
@@ -155,9 +183,13 @@ class BarcodeDetector:
 
                 # Check if candidate is already in all_results
                 duplicate_found = False
-                for existing in all_results:
+                for i, existing in enumerate(all_results):
                     if _is_duplicate(existing, cand):
                         duplicate_found = True
+                        if existing.barcode_type == "Barcode" and cand.barcode_type != "Barcode":
+                            all_results[i] = cand
+                        elif (existing.width <= 0 or existing.height <= 0) and (cand.width > 0 and cand.height > 0):
+                            all_results[i] = cand
                         break
 
                 if not duplicate_found:
@@ -165,18 +197,25 @@ class BarcodeDetector:
                     new_added = True
 
             if new_added:
+                stages_without_new = 0
                 successful_stages.append(stage_name)
                 logger.info(
                     f"Stage '{stage_name}' yielded {len(raw_stage_results)} detection(s)."
                 )
+            else:
+                stages_without_new += 1
 
-            # Early stopping optimization:
-            if len(all_results) > 0 and (fast_mode or stage_name in ("Original Image", "Grayscale Image")):
-                break
-
-            # If fast_mode is on and 2 lightweight stages completed without result, stop to preserve FPS
-            if fast_mode and len(stages_attempted) >= 2:
-                break
+            # Camera fast_mode optimization:
+            # Evaluate the first 2 fast stages (Original + Grayscale) to capture all barcodes and QR codes without FPS drop
+            if fast_mode:
+                if len(stages_attempted) >= 2:
+                    break
+            else:
+                # Standard image mode:
+                # Allow comprehensive passes so all barcodes and QR codes in the image are found.
+                # Stop if core passes completed and no new barcodes were found for 3 consecutive stages.
+                if len(all_results) > 0 and len(stages_attempted) >= 5 and stages_without_new >= 3:
+                    break
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
         success = len(all_results) > 0
@@ -211,8 +250,22 @@ class BarcodeDetector:
         scale_factor: float,
         stage_name: str,
     ) -> List[BarcodeResult]:
-        """Attempt barcode decoding on an individual image variant and map coordinates back."""
+        """Attempt barcode decoding on an individual image variant and map coordinates back.
+        
+        Runs all available decoding engines (ZXing-C++, PyZBar, OpenCV Barcode, OpenCV QR)
+        and merges detected barcodes and QR codes simultaneously.
+        """
         results: List[BarcodeResult] = []
+
+        def _add_if_new(candidate: BarcodeResult):
+            for i, existing in enumerate(results):
+                if _is_duplicate(existing, candidate):
+                    if existing.barcode_type == "Barcode" and candidate.barcode_type != "Barcode":
+                        results[i] = candidate
+                    elif (existing.width <= 0 or existing.height <= 0) and (candidate.width > 0 and candidate.height > 0):
+                        results[i] = candidate
+                    return
+            results.append(candidate)
 
         # 1. Primary engine: ZXing-C++
         if self.has_zxing:
@@ -262,7 +315,7 @@ class BarcodeDetector:
                     else:
                         bx, by, bw, bh = 0, 0, 0, 0
 
-                    results.append(
+                    _add_if_new(
                         BarcodeResult(
                             barcode_type=clean_type,
                             raw_type=raw_type_str,
@@ -276,8 +329,6 @@ class BarcodeDetector:
                             processing_method=stage_name,
                         )
                     )
-                if results:
-                    return results
             except Exception as e:
                 logger.debug(f"ZXing-C++ decode error in stage {stage_name}: {e}")
 
@@ -316,7 +367,7 @@ class BarcodeDetector:
                     bw = max(0, max(xs) - bx)
                     bh = max(0, max(ys) - by)
 
-                    results.append(
+                    _add_if_new(
                         BarcodeResult(
                             barcode_type=clean_type,
                             raw_type=raw_type,
@@ -330,80 +381,92 @@ class BarcodeDetector:
                             processing_method=stage_name,
                         )
                     )
-                if results:
-                    return results
             except Exception as e:
                 logger.debug(f"PyZBar decode error in stage {stage_name}: {e}")
 
-        # 3. Tertiary fallback: OpenCV detectors
+        # 3. Tertiary complementary engine: OpenCV 1D Barcode Detector
         if self.cv_barcode_detector is not None:
             try:
-                ok, decoded_info, decoded_type, corners = self.cv_barcode_detector.detectAndDecodeMulti(img)
-                if ok and decoded_info:
-                    for text, btype, corner_set in zip(decoded_info, decoded_type, corners):
-                        if text:
-                            clean_type = normalize_barcode_type(btype if btype else "Barcode")
-                            orig_poly = [
-                                ImageProcessor.transform_point_to_original(
-                                    (int(pt[0]), int(pt[1])), orig_w, orig_h, rot_angle, scale_factor
+                ret = self.cv_barcode_detector.detectAndDecodeMulti(img)
+                if ret and len(ret) >= 3 and ret[0]:
+                    decoded_info = ret[1]
+                    corners = ret[2]
+                    decoded_type = ret[3] if len(ret) > 3 else []
+                    if decoded_info is not None:
+                        for i, text in enumerate(decoded_info):
+                            if text:
+                                btype = decoded_type[i] if (decoded_type is not None and len(decoded_type) > i) else "Barcode"
+                                clean_type = normalize_barcode_type(btype if btype else "Barcode")
+                                corner_set = corners[i] if (corners is not None and len(corners) > i) else []
+                                orig_poly = []
+                                if corner_set is not None and len(corner_set) > 0:
+                                    orig_poly = [
+                                        ImageProcessor.transform_point_to_original(
+                                            (int(pt[0]), int(pt[1])), orig_w, orig_h, rot_angle, scale_factor
+                                        )
+                                        for pt in corner_set
+                                    ]
+                                xs = [p[0] for p in orig_poly] if orig_poly else [0]
+                                ys = [p[1] for p in orig_poly] if orig_poly else [0]
+                                bx = max(0, min(xs))
+                                by = max(0, min(ys))
+                                bw = max(0, max(xs) - bx)
+                                bh = max(0, max(ys) - by)
+                                _add_if_new(
+                                    BarcodeResult(
+                                        barcode_type=clean_type,
+                                        raw_type=str(btype),
+                                        data=str(text),
+                                        x=bx,
+                                        y=by,
+                                        width=bw,
+                                        height=bh,
+                                        polygon=orig_poly,
+                                        rotation=rot_angle,
+                                        processing_method=stage_name,
+                                    )
                                 )
-                                for pt in corner_set
-                            ]
-                            xs = [p[0] for p in orig_poly]
-                            ys = [p[1] for p in orig_poly]
-                            bx = max(0, min(xs))
-                            by = max(0, min(ys))
-                            bw = max(0, max(xs) - bx)
-                            bh = max(0, max(ys) - by)
-                            results.append(
-                                BarcodeResult(
-                                    barcode_type=clean_type,
-                                    raw_type=btype,
-                                    data=text,
-                                    x=bx,
-                                    y=by,
-                                    width=bw,
-                                    height=bh,
-                                    polygon=orig_poly,
-                                    rotation=rot_angle,
-                                    processing_method=stage_name,
-                                )
-                            )
             except Exception as e:
                 logger.debug(f"OpenCV BarcodeDetector error in stage {stage_name}: {e}")
 
-        if not results and self.cv_qr_detector is not None:
+        # 4. Tertiary complementary engine: OpenCV QR Code Detector (Always run alongside barcode detector)
+        if self.cv_qr_detector is not None:
             try:
-                ok, decoded_info, points, _ = self.cv_qr_detector.detectAndDecodeMulti(img)
-                if ok and decoded_info:
-                    for text, corner_set in zip(decoded_info, points):
-                        if text:
-                            orig_poly = [
-                                ImageProcessor.transform_point_to_original(
-                                    (int(pt[0]), int(pt[1])), orig_w, orig_h, rot_angle, scale_factor
+                ret = self.cv_qr_detector.detectAndDecodeMulti(img)
+                if ret and len(ret) >= 3 and ret[0]:
+                    decoded_info = ret[1]
+                    points = ret[2]
+                    if decoded_info is not None and points is not None:
+                        for text, corner_set in zip(decoded_info, points):
+                            if text:
+                                orig_poly = []
+                                if corner_set is not None and len(corner_set) > 0:
+                                    orig_poly = [
+                                        ImageProcessor.transform_point_to_original(
+                                            (int(pt[0]), int(pt[1])), orig_w, orig_h, rot_angle, scale_factor
+                                        )
+                                        for pt in corner_set
+                                    ]
+                                xs = [p[0] for p in orig_poly] if orig_poly else [0]
+                                ys = [p[1] for p in orig_poly] if orig_poly else [0]
+                                bx = max(0, min(xs))
+                                by = max(0, min(ys))
+                                bw = max(0, max(xs) - bx)
+                                bh = max(0, max(ys) - by)
+                                _add_if_new(
+                                    BarcodeResult(
+                                        barcode_type="QR Code",
+                                        raw_type="QRCODE",
+                                        data=str(text),
+                                        x=bx,
+                                        y=by,
+                                        width=bw,
+                                        height=bh,
+                                        polygon=orig_poly,
+                                        rotation=rot_angle,
+                                        processing_method=stage_name,
+                                    )
                                 )
-                                for pt in corner_set
-                            ]
-                            xs = [p[0] for p in orig_poly]
-                            ys = [p[1] for p in orig_poly]
-                            bx = max(0, min(xs))
-                            by = max(0, min(ys))
-                            bw = max(0, max(xs) - bx)
-                            bh = max(0, max(ys) - by)
-                            results.append(
-                                BarcodeResult(
-                                    barcode_type="QR Code",
-                                    raw_type="QRCODE",
-                                    data=text,
-                                    x=bx,
-                                    y=by,
-                                    width=bw,
-                                    height=bh,
-                                    polygon=orig_poly,
-                                    rotation=rot_angle,
-                                    processing_method=stage_name,
-                                )
-                            )
             except Exception as e:
                 logger.debug(f"OpenCV QRCodeDetector error in stage {stage_name}: {e}")
 

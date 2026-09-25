@@ -6,30 +6,47 @@ from pathlib import Path
 import queue
 import threading
 import time
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-import customtkinter as ctk
-from PIL import Image
-import cv2
-import numpy as np
+import customtkinter as ctk  # pyrefly: ignore [missing-import] # type: ignore
+from PIL import Image  # pyrefly: ignore [missing-import] # type: ignore
+import cv2  # pyrefly: ignore [missing-import] # type: ignore
+import numpy as np  # pyrefly: ignore [missing-import] # type: ignore
 
-from src.models import BarcodeResult, DetectionReport, ImageMetrics, Product, ScanRecord, User, AuditLog
-from src.image_processor import ImageProcessor, SUPPORTED_EXTENSIONS
-from src.barcode_detector import BarcodeDetector
-from src.camera_scanner import CameraScanner, CameraState, detect_available_cameras
-from src.database import DatabaseManager
-from src.scan_repository import ScanRepository
-from src.product_repository import ProductRepository
-from src.product_service import ProductService
-from src.analytics_repository import AnalyticsRepository
-from src.user_repository import UserRepository
-from src.audit_repository import AuditRepository
-from src.session_manager import SessionManager
-from src.auth_service import AuthService
-from src.authorization_service import AuthorizationService, Permission
-from src.utils import get_logger, copy_to_clipboard
+try:
+    from src.models import BarcodeResult, DetectionReport, ImageMetrics, Product, ScanRecord, User, AuditLog  # pyrefly: ignore [missing-import] # type: ignore
+    from src.image_processor import ImageProcessor, SUPPORTED_EXTENSIONS  # pyrefly: ignore [missing-import] # type: ignore
+    from src.barcode_detector import BarcodeDetector  # pyrefly: ignore [missing-import] # type: ignore
+    from src.camera_scanner import CameraScanner, CameraState, detect_available_cameras  # pyrefly: ignore [missing-import] # type: ignore
+    from src.database import DatabaseManager  # pyrefly: ignore [missing-import] # type: ignore
+    from src.scan_repository import ScanRepository  # pyrefly: ignore [missing-import] # type: ignore
+    from src.product_repository import ProductRepository  # pyrefly: ignore [missing-import] # type: ignore
+    from src.product_service import ProductService  # pyrefly: ignore [missing-import] # type: ignore
+    from src.analytics_repository import AnalyticsRepository  # pyrefly: ignore [missing-import] # type: ignore
+    from src.user_repository import UserRepository  # pyrefly: ignore [missing-import] # type: ignore
+    from src.audit_repository import AuditRepository  # pyrefly: ignore [missing-import] # type: ignore
+    from src.session_manager import SessionManager  # pyrefly: ignore [missing-import] # type: ignore
+    from src.auth_service import AuthService  # pyrefly: ignore [missing-import] # type: ignore
+    from src.authorization_service import AuthorizationService, Permission  # pyrefly: ignore [missing-import] # type: ignore
+    from src.utils import get_logger, copy_to_clipboard  # pyrefly: ignore [missing-import] # type: ignore
+except (ImportError, ModuleNotFoundError):
+    from models import BarcodeResult, DetectionReport, ImageMetrics, Product, ScanRecord, User, AuditLog  # pyrefly: ignore [missing-import] # type: ignore
+    from image_processor import ImageProcessor, SUPPORTED_EXTENSIONS  # pyrefly: ignore [missing-import] # type: ignore
+    from barcode_detector import BarcodeDetector  # pyrefly: ignore [missing-import] # type: ignore
+    from camera_scanner import CameraScanner, CameraState, detect_available_cameras  # pyrefly: ignore [missing-import] # type: ignore
+    from database import DatabaseManager  # pyrefly: ignore [missing-import] # type: ignore
+    from scan_repository import ScanRepository  # pyrefly: ignore [missing-import] # type: ignore
+    from product_repository import ProductRepository  # pyrefly: ignore [missing-import] # type: ignore
+    from product_service import ProductService  # pyrefly: ignore [missing-import] # type: ignore
+    from analytics_repository import AnalyticsRepository  # pyrefly: ignore [missing-import] # type: ignore
+    from user_repository import UserRepository  # pyrefly: ignore [missing-import] # type: ignore
+    from audit_repository import AuditRepository  # pyrefly: ignore [missing-import] # type: ignore
+    from session_manager import SessionManager  # pyrefly: ignore [missing-import] # type: ignore
+    from auth_service import AuthService  # pyrefly: ignore [missing-import] # type: ignore
+    from authorization_service import AuthorizationService, Permission  # pyrefly: ignore [missing-import] # type: ignore
+    from utils import get_logger, copy_to_clipboard  # pyrefly: ignore [missing-import] # type: ignore
 
 logger = get_logger()
 
@@ -1830,6 +1847,7 @@ class BarcodeReaderApp(ctk.CTk):
         self.camera_scanner = CameraScanner(detector=self.detector)
         self.camera_scanner.on_frame_ready = self._on_camera_frame_ready
         self.camera_scanner.on_barcode_confirmed = self._on_camera_barcode_confirmed
+        self.camera_scanner.on_barcodes_confirmed = self._on_camera_barcodes_confirmed
         self.camera_scanner.on_state_changed = self._on_camera_state_changed
 
         # State Variables
@@ -1839,6 +1857,11 @@ class BarcodeReaderApp(ctk.CTk):
         self.annotated_image: Optional[np.ndarray] = None
         self.current_report: Optional[DetectionReport] = None
         self.is_processing = False
+
+        # Live Camera Active Session Codes for simultaneous multi-scanning
+        self.live_camera_codes: Dict[Tuple[str, str], BarcodeResult] = {}
+        self.live_camera_last_seen: Dict[Tuple[str, str], float] = {}
+        self._last_rendered_keys: Tuple[Tuple[str, str], ...] = ()
 
         # Build UI layout
         self._create_layout()
@@ -2216,13 +2239,37 @@ class BarcodeReaderApp(ctk.CTk):
         self.save_all_btn = ctk.CTkButton(
             results_header,
             text="💾 Save All",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
             fg_color="#059669",
             hover_color="#047857",
             width=85,
             height=28,
             corner_radius=6,
             command=self._on_save_all_click,
+        )
+
+        self.copy_all_btn = ctk.CTkButton(
+            results_header,
+            text="📋 Copy All",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            fg_color="#2563eb",
+            hover_color="#1d4ed8",
+            width=85,
+            height=28,
+            corner_radius=6,
+            command=self._on_copy_all_click,
+        )
+
+        self.clear_btn = ctk.CTkButton(
+            results_header,
+            text="🗑️ Clear",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            fg_color=("gray75", "#27272a"),
+            hover_color=("gray65", "#3f3f46"),
+            width=65,
+            height=28,
+            corner_radius=6,
+            command=self._on_clear_results_click,
         )
 
         self.count_badge = ctk.CTkLabel(
@@ -2410,29 +2457,59 @@ class BarcodeReaderApp(ctk.CTk):
             res_w, res_h = self.camera_scanner.actual_resolution
             self.pipeline_info_label.configure(text=f"Resolution: {res_w}×{res_h} | {fps} FPS")
 
+            now = time.time()
             if results:
-                count = len(results)
-                plural = "barcode" if count == 1 else "barcodes"
-                self._set_status(f"✓ {count} {plural} detected live", state="normal")
-                self.count_badge.configure(text=f"{count} detected", fg_color="#065f46", text_color="#34d399")
-                if count > 1:
-                    self.save_all_btn.configure(text=f"💾 Save All ({count})")
-                    self.save_all_btn.pack(side="right", padx=(0, 8))
-                else:
-                    self.save_all_btn.pack_forget()
+                for r in results:
+                    key = (r.barcode_type, r.data)
+                    self.live_camera_codes[key] = r
+                    self.live_camera_last_seen[key] = now
 
-                report = DetectionReport(
-                    success=True,
-                    results=results,
-                    stage_used="Live Camera Stream",
-                    processing_time_ms=round(1000.0 / max(1.0, fps), 1),
-                    engine_used="ZXing-C++" if self.detector.has_zxing else "PyZBar",
-                )
-                self.current_report = report
-                self._render_results(report)
-            else:
-                self.count_badge.configure(text="Scanning...", fg_color=("gray80", "#27272a"), text_color=("gray20", "#a1a1aa"))
-                self.save_all_btn.pack_forget()
+            # Expire codes not detected in the last 3.5 seconds
+            expired_keys = [k for k, last_t in self.live_camera_last_seen.items() if now - last_t > 3.5]
+            for k in expired_keys:
+                self.live_camera_codes.pop(k, None)
+                self.live_camera_last_seen.pop(k, None)
+
+            current_keys = tuple(sorted(self.live_camera_codes.keys()))
+            if current_keys != self._last_rendered_keys:
+                self._last_rendered_keys = current_keys
+                active_codes = list(self.live_camera_codes.values())
+                count = len(active_codes)
+                if count > 0:
+                    qr_count = sum(1 for r in active_codes if "QR" in r.barcode_type.upper())
+                    linear_count = count - qr_count
+                    if qr_count > 0 and linear_count > 0:
+                        plural = f"{count} codes ({linear_count} barcode{'s' if linear_count != 1 else ''}, {qr_count} QR)"
+                    elif qr_count > 0:
+                        plural = f"{qr_count} QR code{'s' if qr_count != 1 else ''}"
+                    else:
+                        plural = f"{linear_count} barcode{'s' if linear_count != 1 else ''}"
+
+                    self._set_status(f"✓ {plural} detected live", state="normal")
+                    self.count_badge.configure(text=f"{count} detected", fg_color="#065f46", text_color="#34d399")
+                    self.save_all_btn.configure(text=f"💾 Save All ({count})")
+                    self.save_all_btn.pack(side="right", padx=(0, 6))
+                    self.copy_all_btn.configure(text=f"📋 Copy All ({count})")
+                    self.copy_all_btn.pack(side="right", padx=(0, 6))
+                    self.clear_btn.pack(side="right", padx=(0, 6))
+
+                    report = DetectionReport(
+                        success=True,
+                        results=active_codes,
+                        stage_used="Live Camera Stream",
+                        processing_time_ms=round(1000.0 / max(1.0, fps), 1),
+                        engine_used="ZXing-C++" if self.detector.has_zxing else ("PyZBar" if self.detector.has_pyzbar else "OpenCV"),
+                    )
+                    self.current_report = report
+                    self._render_results(report)
+                else:
+                    self.count_badge.configure(text="Scanning...", fg_color=("gray80", "#27272a"), text_color=("gray20", "#a1a1aa"))
+                    self.save_all_btn.pack_forget()
+                    self.copy_all_btn.pack_forget()
+                    self.clear_btn.pack_forget()
+                    empty_rep = DetectionReport(success=False, results=[], stage_used="Live Camera Stream")
+                    self.current_report = empty_rep
+                    self._render_results(empty_rep)
 
         self._dispatch_to_main_thread(update_frame)
 
@@ -2443,6 +2520,51 @@ class BarcodeReaderApp(ctk.CTk):
                 self._auto_save_camera_barcode(result)
 
         self._dispatch_to_main_thread(on_confirmed)
+
+    def _on_camera_barcodes_confirmed(self, results: List[BarcodeResult]):
+        def on_confirmed():
+            if len(results) > 1:
+                qr_count = sum(1 for r in results if "QR" in r.barcode_type.upper())
+                linear_count = len(results) - qr_count
+                if qr_count > 0 and linear_count > 0:
+                    breakdown = f"{linear_count} barcode(s), {qr_count} QR"
+                elif qr_count > 0:
+                    breakdown = f"{qr_count} QR code(s)"
+                else:
+                    breakdown = f"{linear_count} barcode(s)"
+                self._set_status(f"✓ Confirmed {len(results)} codes simultaneously ({breakdown})", state="normal")
+            elif len(results) == 1:
+                self._set_status(f"✓ Confirmed {results[0].barcode_type}: {results[0].data}", state="normal")
+
+            if self.camera_scanner.auto_save_enabled:
+                for r in results:
+                    self._auto_save_camera_barcode(r)
+
+        self._dispatch_to_main_thread(on_confirmed)
+
+    def _on_copy_all_click(self):
+        self.session_manager.touch()
+        if not self.current_report or not self.current_report.results:
+            return
+        all_data = "\n".join(r.data for r in self.current_report.results)
+        if copy_to_clipboard(all_data, self):
+            count = len(self.current_report.results)
+            self.copy_all_btn.configure(text="✓ Copied", fg_color="#059669")
+            self._set_status(f"Copied {count} code(s) to clipboard.", state="normal")
+            self.after(2000, lambda: self.copy_all_btn.configure(text=f"📋 Copy All ({count})", fg_color="#2563eb"))
+
+    def _on_clear_results_click(self):
+        self.session_manager.touch()
+        self.live_camera_codes.clear()
+        self.live_camera_last_seen.clear()
+        self._last_rendered_keys = ()
+        self.current_report = None
+        self._render_results(DetectionReport(success=False, results=[]))
+        self.count_badge.configure(text="0 detected", fg_color=("gray80", "#27272a"), text_color=("gray20", "#a1a1aa"))
+        self.save_all_btn.pack_forget()
+        self.copy_all_btn.pack_forget()
+        self.clear_btn.pack_forget()
+        self._set_status("Cleared results. Ready to scan.", state="normal")
 
     def _auto_save_camera_barcode(self, result: BarcodeResult):
         if not self.is_db_connected:
@@ -2617,22 +2739,47 @@ class BarcodeReaderApp(ctk.CTk):
         time_sec = report.processing_time_ms / 1000.0
         if report.success:
             count = report.count
-            plural = "barcode" if count == 1 else "barcodes"
-            self._set_status(f"{count} {plural} detected in {time_sec:.2f}s", state="normal")
+            qr_count = sum(1 for r in report.results if "QR" in r.barcode_type.upper())
+            linear_count = count - qr_count
+            if qr_count > 0 and linear_count > 0:
+                summary_msg = f"{count} codes ({linear_count} barcode{'s' if linear_count != 1 else ''}, {qr_count} QR)"
+            elif qr_count > 0:
+                summary_msg = f"{qr_count} QR code{'s' if qr_count != 1 else ''}"
+            else:
+                summary_msg = f"{linear_count} barcode{'s' if linear_count != 1 else ''}"
+
+            self._set_status(f"✓ {summary_msg} detected in {time_sec:.2f}s", state="normal")
             self.pipeline_info_label.configure(text=f"Engine: {report.engine_used} | {report.processing_time_ms} ms")
             self.count_badge.configure(text=f"{count} detected", fg_color="#065f46", text_color="#34d399")
             if count > 1:
                 self.save_all_btn.configure(text=f"💾 Save All ({count})")
-                self.save_all_btn.pack(side="right", padx=(0, 8))
+                self.save_all_btn.pack(side="right", padx=(0, 6))
+                self.copy_all_btn.configure(text=f"📋 Copy All ({count})")
+                self.copy_all_btn.pack(side="right", padx=(0, 6))
             else:
                 self.save_all_btn.pack_forget()
+                self.copy_all_btn.pack_forget()
+            self.clear_btn.pack(side="right", padx=(0, 6))
         else:
-            self._set_status(f"No barcode detected ({time_sec:.2f}s)", state="warning")
+            self._set_status(f"No barcode or QR code detected ({time_sec:.2f}s)", state="warning")
             self.pipeline_info_label.configure(text=f"Engine: {report.engine_used} | {report.processing_time_ms} ms")
             self.count_badge.configure(text="0 detected", fg_color=("gray80", "#27272a"), text_color=("gray20", "#a1a1aa"))
             self.save_all_btn.pack_forget()
+            self.copy_all_btn.pack_forget()
+            self.clear_btn.pack_forget()
 
-        self.summary_left_lbl.configure(text=f"📊 Barcodes: {report.count}\n⏱️ Time: {time_sec:.2f}s ({report.processing_time_ms}ms)")
+        codes_breakdown = f"Codes: {report.count}"
+        if report.success:
+            qr_c = sum(1 for r in report.results if "QR" in r.barcode_type.upper())
+            lin_c = report.count - qr_c
+            if qr_c > 0 and lin_c > 0:
+                codes_breakdown = f"Codes: {report.count} ({lin_c} Barcodes, {qr_c} QR)"
+            elif qr_c > 0:
+                codes_breakdown = f"Codes: {report.count} (QR Codes)"
+            else:
+                codes_breakdown = f"Codes: {report.count} (1D Barcodes)"
+
+        self.summary_left_lbl.configure(text=f"📊 {codes_breakdown}\n⏱️ Time: {time_sec:.2f}s ({report.processing_time_ms}ms)")
         self.summary_right_lbl.configure(text=f"📐 Size: {w}×{h} px\n⚙️ Method: {report.stage_used}")
         self.summary_card.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 6))
 
@@ -2645,6 +2792,8 @@ class BarcodeReaderApp(ctk.CTk):
         self.summary_card.grid_forget()
         self.warning_banner.grid_forget()
         self.save_all_btn.pack_forget()
+        self.copy_all_btn.pack_forget()
+        self.clear_btn.pack_forget()
 
         for widget in self.results_scrollable.winfo_children():
             widget.destroy()
@@ -2759,9 +2908,27 @@ class BarcodeReaderApp(ctk.CTk):
         header_frame = ctk.CTkFrame(card, fg_color="transparent")
         header_frame.pack(fill="x", padx=16, pady=(12, 6))
 
+        palette_hex = ["#10b981", "#0ea5e9", "#f97316", "#a855f7", "#84cc16", "#eab308"]
+        color_tag = palette_hex[(idx - 1) % len(palette_hex)]
+
+        is_qr = "QR" in result.barcode_type.upper()
+        prefix = "QR Code" if is_qr else "Barcode"
+
+        # Badge pill showing code index matching bounding box number and color
         ctk.CTkLabel(
             header_frame,
-            text=f"Barcode #{idx}",
+            text=f"#{idx}",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            fg_color=color_tag,
+            text_color="#ffffff",
+            corner_radius=6,
+            padx=7,
+            pady=2,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkLabel(
+            header_frame,
+            text=f"{prefix}",
             font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
             text_color=("gray10", "#f4f4f5"),
         ).pack(side="left")
@@ -2774,7 +2941,7 @@ class BarcodeReaderApp(ctk.CTk):
         elif result.validation_status == "Invalid":
             val_bg, val_fg, val_txt = "#7f1d1d", "#f87171", "✕ Invalid"
         else:
-            val_bg, val_fg, val_txt = ("gray75", "#3f3f46"), ("gray30", "#a1a1aa"), "ℹ Checksum N/A"
+            val_bg, val_fg, val_txt = ("gray75", "#3f3f46"), ("gray30", "#a1a1aa"), "ℹ 2D / Checksum N/A" if is_qr else "ℹ Checksum N/A"
 
         ctk.CTkLabel(
             badges_container,
@@ -2787,12 +2954,14 @@ class BarcodeReaderApp(ctk.CTk):
             pady=2,
         ).pack(side="left", padx=(0, 6))
 
+        type_bg = "#065f46" if is_qr else "#1e3a8a"
+        type_fg = "#34d399" if is_qr else "#93c5fd"
         ctk.CTkLabel(
             badges_container,
             text=result.barcode_type,
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            fg_color="#1e3a8a",
-            text_color="#93c5fd",
+            fg_color=type_bg,
+            text_color=type_fg,
             corner_radius=6,
             padx=10,
             pady=3,
@@ -3004,6 +3173,9 @@ class BarcodeReaderApp(ctk.CTk):
         self.original_image = None
         self.annotated_image = None
         self.current_report = None
+        self.live_camera_codes.clear()
+        self.live_camera_last_seen.clear()
+        self._last_rendered_keys = ()
 
         self.preview_image_label.grid_forget()
         self.preview_image_label.configure(image=None)
@@ -3012,6 +3184,8 @@ class BarcodeReaderApp(ctk.CTk):
 
         self.summary_card.grid_forget()
         self.save_all_btn.pack_forget()
+        self.copy_all_btn.pack_forget()
+        self.clear_btn.pack_forget()
         for widget in self.results_scrollable.winfo_children():
             widget.destroy()
 

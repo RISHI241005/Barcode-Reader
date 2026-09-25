@@ -55,9 +55,26 @@ let cameraCooldown = new Map(), historyOffset = 0, historyRows = [], historyTota
 let toastTimer, searchTimer, catalogRequest = 0;
 let cameraActive = false, noDetectCount = 0, nativeRafId = null;
 
-// Browser-native barcode detector for instant overlay (Chrome/Edge 83+, no network needed)
+// Distinct color palette for simultaneous bounding boxes and result badges
+const PALETTE = ['#10b981', '#0ea5e9', '#f97316', '#a855f7', '#84cc16', '#eab308'];
+let liveCameraCodes = new Map(); // key -> { ...BarcodeResult, lastSeen: timestamp }
+
+// Browser-native barcode detector for instant multi-code overlay (Chrome/Edge 83+, no network needed)
 let nativeDetector = null;
-try { if ('BarcodeDetector' in window) nativeDetector = new BarcodeDetector(); } catch {}
+const SUPPORTED_FORMATS = [
+  'qr_code', 'ean_13', 'ean_8', 'upc_a', 'upc_e',
+  'code_128', 'code_39', 'code_93', 'codabar', 'itf', 'data_matrix', 'aztec', 'pdf417'
+];
+if (typeof window !== 'undefined' && 'BarcodeDetector' in window) {
+  BarcodeDetector.getSupportedFormats()
+    .then((formats) => {
+      const desired = SUPPORTED_FORMATS.filter((f) => formats.includes(f));
+      nativeDetector = new BarcodeDetector({ formats: desired.length ? desired : formats });
+    })
+    .catch(() => {
+      try { nativeDetector = new BarcodeDetector(); } catch {}
+    });
+}
 
 function toast(message) {
   $('toast').textContent = message; $('toast').hidden = false;
@@ -204,7 +221,13 @@ async function scanFile(file) {
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', .92));
     if (!blob) throw new Error('This image could not be prepared. Try a JPG or PNG file.');
     const report = await scanBlob(blob, file.name || 'image.jpg'); drawPreview(report); renderResults(report);
-    setStatus(report.success ? `${report.results.length} code${report.results.length === 1 ? '' : 's'} decoded` : 'No barcode found. Try better lighting or a closer image.');
+    const qrCount = (report.results || []).filter((r) => /qr/i.test(r.barcode_type || '')).length;
+    const barCount = (report.results || []).length - qrCount;
+    setStatus(
+      report.success
+        ? `${report.results.length} code${report.results.length === 1 ? '' : 's'} decoded simultaneously (${barCount} barcode${barCount === 1 ? '' : 's'}, ${qrCount} QR)`
+        : 'No barcode found. Try better lighting or a closer image.'
+    );
   } catch (error) {
     const message = error.name === 'InvalidStateError' ? 'This image format cannot be opened. Try a JPG or PNG file.' : error.message;
     setStatus(message, true); showError($('results'), new Error(message)); $('result-count').textContent = '0';
@@ -214,35 +237,153 @@ async function scanFile(file) {
 function drawPreview(report) {
   if (!bitmap) return;
   const canvas = $('image-preview'), ctx = canvas.getContext('2d'); ctx.drawImage(bitmap, 0, 0);
-  if (!report) return;
+  if (!report || !report.results || report.results.length === 0) return;
   const sx = canvas.width / report.image_width, sy = canvas.height / report.image_height;
-  ctx.strokeStyle = '#389446'; ctx.lineWidth = Math.max(2, canvas.width / 350);
-  for (const result of report.results) ctx.strokeRect(result.x * sx, result.y * sy, result.width * sx, result.height * sy);
+  ctx.lineWidth = Math.max(2.5, canvas.width / 350);
+  ctx.font = 'bold 13px Inter, sans-serif';
+  report.results.forEach((result, idx) => {
+    const color = PALETTE[idx % PALETTE.length];
+    const rx = result.x * sx, ry = result.y * sy, rw = result.width * sx, rh = result.height * sy;
+    ctx.strokeStyle = color;
+    ctx.strokeRect(rx, ry, rw, rh);
+    ctx.fillStyle = color;
+    const tag = `#${idx + 1} ${result.barcode_type}`;
+    ctx.fillText(tag, rx + 4, Math.max(ry - 6, 16));
+  });
 }
 
-function renderResults(report) {
-  const target = $('results'); target.replaceChildren(); $('result-count').textContent = String(report.results.length);
-  if (!report.success) {
+function renderResults(report, options = {}) {
+  const target = $('results');
+  const results = report?.results || [];
+  $('result-count').textContent = String(results.length);
+
+  if (!report?.success || results.length === 0) {
+    target.replaceChildren();
+    delete target.dataset.lastSignature;
     const box = element('div', 'results-empty');
-    box.append(element('div', 'empty-symbol', '⌁'), element('h3', '', 'No barcode found'), element('p', '', 'Try a sharper image, more light, or move closer to the code.')); target.append(box);
+    box.append(
+      element('div', 'empty-symbol', '⌁'),
+      element('h3', '', 'No barcode found'),
+      element('p', '', 'Try a sharper image, more light, or move closer to the code.')
+    );
+    target.append(box);
+    return;
   }
-  for (const result of report.results) {
-    const card = element('article', 'result-item'), top = element('div', 'result-top');
-    top.append(element('span', 'result-type', result.barcode_type), element('span', '', result.validation_status === 'Valid' ? '✓ Valid checksum' : result.validation_status === 'Invalid' ? 'Invalid checksum' : 'Decoded'));
-    card.append(top, element('p', 'result-data', result.data), element('p', 'result-meta', result.validation_details || 'No checksum applies to this format.'),
-      element('p', 'result-meta', 'Read with ' + result.processing_method));
+
+  // Avoid unnecessary DOM rebuild if live camera codes haven't changed
+  const currentSignature = results.map((r) => `${r.barcode_type}:${r.data}:${r.validation_status}`).sort().join('||');
+  if (options.isLive && target.dataset.lastSignature === currentSignature) {
+    return;
+  }
+  target.dataset.lastSignature = currentSignature;
+  target.replaceChildren();
+
+  // Summary header for simultaneous results
+  const qrCount = results.filter((r) => /qr/i.test(r.barcode_type || '')).length;
+  const barCount = results.length - qrCount;
+  const summaryBar = element('div', 'results-summary-bar');
+  const summaryText = element(
+    'span',
+    '',
+    results.length === 1
+      ? `1 code detected (${qrCount ? '1 QR' : '1 barcode'})`
+      : `${results.length} codes detected simultaneously (${barCount} barcode${barCount === 1 ? '' : 's'}, ${qrCount} QR)`
+  );
+  const summaryActions = element('div', 'results-summary-actions');
+  const copyAllBtn = action('📋 Copy all', async () => {
+    const allData = results.map((r) => r.data).join('\n');
+    try {
+      await navigator.clipboard.writeText(allData);
+      toast(`Copied ${results.length} code${results.length === 1 ? '' : 's'} to clipboard.`);
+    } catch {
+      toast('Copy unavailable. Select code text manually.');
+    }
+  });
+  const clearBtn = action('🗑️ Clear', () => {
+    liveCameraCodes.clear();
+    clearCameraOverlay();
+    target.replaceChildren();
+    $('result-count').textContent = '0';
+    delete target.dataset.lastSignature;
+    if (bitmap) drawPreview();
+    const emptyBox = element('div', 'results-empty');
+    emptyBox.append(
+      element('div', 'empty-symbol', '⌁'),
+      element('h3', '', 'Results cleared'),
+      element('p', '', 'Ready for your next scan.')
+    );
+    target.append(emptyBox);
+  });
+  summaryActions.append(copyAllBtn, clearBtn);
+  summaryBar.append(summaryText, summaryActions);
+  target.append(summaryBar);
+
+  // Individual cards for each code
+  results.forEach((result, idx) => {
+    const card = element('article', 'result-item');
+    const top = element('div', 'result-top');
+    const leftTop = element('div', 'left-top');
+
+    const color = PALETTE[idx % PALETTE.length];
+    const indexBadge = element('span', 'code-index-badge', `#${idx + 1}`);
+    indexBadge.style.backgroundColor = color;
+
+    const isQr = /qr/i.test(result.barcode_type || '');
+    const typeLabel = element('span', 'result-type', result.barcode_type);
+    const kindBadge = element('span', `val-badge ${isQr ? 'qr-type' : 'barcode-type'}`, isQr ? '📱 QR Code' : '📦 Barcode');
+    leftTop.append(indexBadge, typeLabel, kindBadge);
+
+    const valClass = result.validation_status === 'Valid' ? 'val-badge valid' : result.validation_status === 'Invalid' ? 'val-badge invalid' : 'val-badge';
+    const valBadge = element('span', valClass, result.validation_status === 'Valid' ? '✓ Valid' : result.validation_status === 'Invalid' ? 'Invalid checksum' : 'Decoded');
+
+    top.append(leftTop, valBadge);
+
+    card.append(
+      top,
+      element('p', 'result-data', result.data),
+      element('p', 'result-meta', result.validation_details || 'No checksum applies to this format.'),
+      element('p', 'result-meta', 'Read with ' + (result.processing_method || 'Multi-Engine'))
+    );
+
     const buttons = element('div', 'result-actions');
-    buttons.append(action('Copy data', async () => { try { await navigator.clipboard.writeText(result.data); toast('Barcode data copied.'); } catch { toast('Copy is unavailable. Select the decoded data to copy it.'); } }));
+    buttons.append(
+      action('Copy data', async () => {
+        try {
+          await navigator.clipboard.writeText(result.data);
+          toast('Barcode data copied.');
+        } catch {
+          toast('Copy is unavailable. Select the decoded data to copy it.');
+        }
+      })
+    );
+
     const href = safeLink(result.data);
     if (href) buttons.append(link('Open link ↗', href));
-    if (/^[0-9]{8,14}$/.test(result.data)) buttons.append(action('Find product ↗', async () => { await navigate('catalog'); $('lookup-barcode').value = result.data; await lookupProduct(result.data); }));
-    card.append(buttons); target.append(card);
+    if (/^[0-9]{8,14}$/.test(result.data)) {
+      buttons.append(
+        action('Find product ↗', async () => {
+          await navigate('catalog');
+          $('lookup-barcode').value = result.data;
+          await lookupProduct(result.data);
+        })
+      );
+    }
+    card.append(buttons);
+    target.append(card);
+  });
+
+  if (report.engine_used && report.processing_time_ms !== undefined) {
+    target.append(element('div', 'scan-metrics', report.engine_used + ' · ' + Math.round(report.processing_time_ms) + ' ms'));
   }
-  target.append(element('div', 'scan-metrics', report.engine_used + ' · ' + Math.round(report.processing_time_ms) + ' ms'));
-  $('save-status').textContent = report.saved ? '✓ Saved privately to your account.' : user ? 'Live detections save after a stable reading.' : 'Sign in to save scans across devices.';
+
+  $('save-status').textContent = report.saved
+    ? '✓ Saved privately to your account.'
+    : user
+    ? (options.isLive ? '✓ Active live detections auto-saved to your account.' : 'Live detections save after a stable reading.')
+    : 'Sign in to save scans across devices.';
 }
 
-// Draw green detection boxes on the camera overlay canvas
+// Draw multi-colored detection boxes on the camera overlay canvas
 function drawCameraOverlay(results, apiW, apiH) {
   const overlay = $('camera-overlay'), video = $('camera-video');
   if (!overlay || video.hidden || !video.videoWidth) return;
@@ -259,17 +400,15 @@ function drawCameraOverlay(results, apiW, apiH) {
   const sx = rw / apiW, sy = rh / apiH;
   ctx.lineWidth = 2.5;
   ctx.font = 'bold 12px Inter, sans-serif';
-  for (const r of results) {
+  results.forEach((r, idx) => {
+    const color = PALETTE[idx % PALETTE.length];
     const dx = ox + r.x * sx, dy = oy + r.y * sy, dw = r.width * sx, dh = r.height * sy;
-    // Glowing green fill
-    ctx.shadowColor = '#39ff6a'; ctx.shadowBlur = 14;
-    ctx.strokeStyle = '#39ff6a'; ctx.strokeRect(dx, dy, dw, dh);
-    ctx.fillStyle = 'rgba(57,255,106,0.10)'; ctx.fillRect(dx, dy, dw, dh);
-    // Type label above the box
-    ctx.shadowBlur = 6; ctx.fillStyle = '#39ff6a';
-    ctx.fillText(r.barcode_type, dx + 4, Math.max(dy - 6, oy + 14));
+    ctx.shadowColor = color; ctx.shadowBlur = 12;
+    ctx.strokeStyle = color; ctx.strokeRect(dx, dy, dw, dh);
+    ctx.fillStyle = color;
+    ctx.fillText(`#${idx + 1} ${r.barcode_type}`, dx + 4, Math.max(dy - 6, oy + 14));
     ctx.shadowBlur = 0;
-  }
+  });
 }
 
 function clearCameraOverlay() {
@@ -278,7 +417,7 @@ function clearCameraOverlay() {
   overlay.getContext('2d').clearRect(0, 0, overlay.width, overlay.height);
 }
 
-// Native BarcodeDetector loop — runs every animation frame, gives instant visual feedback
+// Native BarcodeDetector loop — runs every animation frame, gives instant multi-code visual feedback
 async function runNativeLoop(epoch) {
   if (epoch !== cameraEpoch || !cameraStream || !nativeDetector) return;
   const video = $('camera-video');
@@ -296,17 +435,54 @@ async function runNativeLoop(epoch) {
         const rw = video.videoWidth * scale, rh = video.videoHeight * scale;
         const ox = (cw - rw) / 2, oy = (ch - rh) / 2;
         ctx.lineWidth = 2.5; ctx.font = 'bold 12px Inter, sans-serif';
-        for (const code of codes) {
+        const now = Date.now();
+        codes.forEach((code, idx) => {
+          const color = PALETTE[idx % PALETTE.length];
           const b = code.boundingBox;
           const dx = ox + b.x * scale, dy = oy + b.y * scale, dw = b.width * scale, dh = b.height * scale;
-          ctx.shadowColor = '#39ff6a'; ctx.shadowBlur = 14;
-          ctx.strokeStyle = '#39ff6a'; ctx.strokeRect(dx, dy, dw, dh);
-          ctx.fillStyle = 'rgba(57,255,106,0.10)'; ctx.fillRect(dx, dy, dw, dh);
-          ctx.shadowBlur = 6; ctx.fillStyle = '#39ff6a';
-          ctx.fillText(code.format?.replace(/_/g, ' ').toUpperCase() || 'CODE', dx + 4, Math.max(dy - 6, oy + 14));
+          ctx.shadowColor = color; ctx.shadowBlur = 14;
+          ctx.strokeStyle = color; ctx.strokeRect(dx, dy, dw, dh);
+          ctx.shadowBlur = 6; ctx.fillStyle = color;
+          const rawFmt = (code.format || 'code').replace(/_/g, '-').toUpperCase();
+          const cleanFmt = rawFmt === 'QR-CODE' ? 'QR Code' : rawFmt;
+          ctx.fillText(`#${idx + 1} ${cleanFmt}`, dx + 4, Math.max(dy - 6, oy + 14));
           ctx.shadowBlur = 0;
+
+          if (code.rawValue) {
+            const key = cleanFmt + ':' + code.rawValue;
+            if (!liveCameraCodes.has(key)) {
+              liveCameraCodes.set(key, {
+                barcode_type: cleanFmt,
+                raw_type: rawFmt,
+                data: code.rawValue,
+                validation_status: 'Decoded',
+                validation_details: 'Hardware detected',
+                processing_method: 'Hardware Live',
+                lastSeen: now
+              });
+            } else {
+              liveCameraCodes.get(key).lastSeen = now;
+            }
+          }
+        });
+
+        // Prune stale live codes
+        for (const [k, item] of liveCameraCodes.entries()) {
+          if (now - item.lastSeen > 4000) liveCameraCodes.delete(k);
         }
-      } else { clearCameraOverlay(); }
+        if (liveCameraCodes.size > 0) {
+          const currentCodes = Array.from(liveCameraCodes.values());
+          renderResults({
+            success: true,
+            results: currentCodes,
+            engine_used: 'Hardware Native',
+            processing_time_ms: 16,
+            saved: !!user
+          }, { isLive: true });
+        }
+      } else {
+        clearCameraOverlay();
+      }
     } catch { /* native detection not available on this frame */ }
   }
   if (epoch === cameraEpoch) nativeRafId = requestAnimationFrame(() => runNativeLoop(epoch));
@@ -318,6 +494,7 @@ function stopCamera() {
   cameraController?.abort(); cameraController = null; cameraActive = false; noDetectCount = 0;
   cameraStream?.getTracks().forEach((track) => track.stop()); cameraStream = null;
   clearCameraOverlay();
+  liveCameraCodes.clear();
   if (typeof document === 'undefined') return;
   $('camera-video').srcObject = null; $('camera-video').hidden = true;
   $('camera-overlay').hidden = true;
@@ -328,7 +505,7 @@ function stopCamera() {
 async function startCamera() {
   if (!navigator.mediaDevices?.getUserMedia) { setStatus('Live camera is unavailable here. Use Take a photo or upload an image.', true); return; }
   stopCamera(); const epoch = cameraEpoch; $('start-camera').disabled = true; $('stop-camera').hidden = false;
-  setStatus('Requesting camera access…'); candidate = ''; candidateCount = 0; cameraCooldown = new Map();
+  setStatus('Requesting camera access…'); candidate = ''; candidateCount = 0; cameraCooldown = new Map(); liveCameraCodes = new Map();
   // Warm up the serverless function so the first camera frame doesn't hit a cold start
   fetch('/api').catch(() => {});
   try {
@@ -337,7 +514,7 @@ async function startCamera() {
     cameraStream = stream; const video = $('camera-video'); video.srcObject = stream; video.hidden = false; $('camera-empty').hidden = true;
     await video.play(); if (epoch !== cameraEpoch) return;
     $('camera-overlay').hidden = false;
-    $('flip-camera').hidden = false; setStatus('Scanning live · hold the barcode steady');
+    $('flip-camera').hidden = false; setStatus('Scanning live · hold barcodes steady in view');
     stream.getVideoTracks()[0]?.addEventListener('ended', () => { if (epoch === cameraEpoch) { stopCamera(); toast('The camera disconnected. Start it again to continue.'); } });
     // Start instant native overlay loop (runs on every animation frame)
     if (nativeDetector) runNativeLoop(epoch);
@@ -371,42 +548,84 @@ async function cameraTick(epoch) {
       try { report = await scanBlob(blob, 'camera.jpg', true, false, cameraController.signal); }
       finally { clearTimeout(timeout); cameraController = null; }
       if (epoch !== cameraEpoch) return;
-      const key = report.results.map((r) => r.barcode_type + ':' + r.data).sort().join('|');
-      candidateCount = key && key === candidate ? candidateCount + 1 : 1; candidate = key;
+
       const now = Date.now();
-      for (const [oldKey, last] of cameraCooldown) if (now - last > 30000) cameraCooldown.delete(oldKey);
-      if (key && candidateCount >= 1 && now - (cameraCooldown.get(key) || 0) >= 8000) {
-        // Barcode confirmed — save if logged in
-        if (user) {
-          const saveCtrl = new AbortController();
-          const saveTimeout = setTimeout(() => saveCtrl.abort(), 8000);
-          try { report = await scanBlob(blob, 'camera.jpg', true, true, saveCtrl.signal); }
-          catch { /* save failed silently */ }
-          finally { clearTimeout(saveTimeout); }
-        }
-        if (epoch !== cameraEpoch) return;
-        // Draw server-confirmed green boxes (overwrites native overlay with exact positions)
-        drawCameraOverlay(report.results, report.image_width, report.image_height);
-        cameraCooldown.set(key, now); renderResults(report);
-        setStatus('✓ Code decoded · scanning for next barcode'); noDetectCount = 0;
-      } else if (key) {
-        // Barcode visible but in cooldown — show box from server result
-        drawCameraOverlay(report.results, report.image_width, report.image_height);
+      if (report && report.results && report.results.length > 0) {
         noDetectCount = 0;
+        // Draw server-confirmed bounding boxes with distinct colors
+        drawCameraOverlay(report.results, report.image_width, report.image_height);
+
+        // Update liveCameraCodes
+        for (const r of report.results) {
+          const codeKey = (r.barcode_type || '') + ':' + (r.data || '');
+          liveCameraCodes.set(codeKey, { ...r, lastSeen: now });
+
+          // Auto-save this confirmed code if logged in and cooldown passed (15s per code)
+          const lastSaved = cameraCooldown.get(codeKey) || 0;
+          if (user && now - lastSaved >= 15000) {
+            cameraCooldown.set(codeKey, now);
+            api('/history', {
+              method: 'POST',
+              body: {
+                barcode_type: r.barcode_type,
+                barcode_data: r.data,
+                source: 'camera',
+                image_name: 'camera.jpg',
+                validation_status: r.validation_status || 'Decoded',
+                validation_details: r.validation_details || '',
+                processing_method: r.processing_method || 'Camera Live',
+                confidence: r.confidence || 1.0,
+                notes: ''
+              }
+            }).catch(() => {});
+          }
+        }
+
+        // Prune stale codes
+        for (const [k, item] of liveCameraCodes.entries()) {
+          if (now - item.lastSeen > 4000) liveCameraCodes.delete(k);
+        }
+
+        const currentCodes = Array.from(liveCameraCodes.values());
+        renderResults({
+          success: true,
+          results: currentCodes,
+          engine_used: report.engine_used,
+          processing_time_ms: report.processing_time_ms,
+          saved: !!user
+        }, { isLive: true });
+
+        const qrCount = currentCodes.filter((c) => /qr/i.test(c.barcode_type || '')).length;
+        const barCount = currentCodes.length - qrCount;
+        setStatus(`✓ ${currentCodes.length} code${currentCodes.length === 1 ? '' : 's'} active (${barCount} barcode${barCount === 1 ? '' : 's'}, ${qrCount} QR)`);
       } else {
-        // No barcode found
-        noDetectCount++;
-        if (!nativeDetector) clearCameraOverlay(); // only clear if no native loop running
-        if (noDetectCount >= 4) {
-          setStatus('Not clear · move closer or improve lighting', true);
+        // No barcode in this frame: check if previously seen codes are still fresh
+        for (const [k, item] of liveCameraCodes.entries()) {
+          if (now - item.lastSeen > 4000) liveCameraCodes.delete(k);
+        }
+        if (liveCameraCodes.size > 0) {
+          const currentCodes = Array.from(liveCameraCodes.values());
+          renderResults({
+            success: true,
+            results: currentCodes,
+            engine_used: report?.engine_used || 'Multi-Engine',
+            processing_time_ms: report?.processing_time_ms || 0,
+            saved: !!user
+          }, { isLive: true });
         } else {
-          setStatus('Scanning live · hold the barcode steady');
+          noDetectCount++;
+          if (!nativeDetector) clearCameraOverlay();
+          if (noDetectCount >= 4) {
+            setStatus('Not clear · move closer or improve lighting', true);
+          } else {
+            setStatus('Scanning live · hold barcodes in view');
+          }
         }
       }
     }
   } catch (error) {
     if (epoch !== cameraEpoch) return;
-    if (error.name === 'AbortError') { setStatus('Scanning live · hold the barcode steady'); return; }
+    if (error.name === 'AbortError') { setStatus('Scanning live · hold barcodes in view'); return; }
     stopCamera(); setStatus(error.message, true);
   } finally { cameraActive = false; }
 }
